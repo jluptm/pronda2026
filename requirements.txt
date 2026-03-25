@@ -3,4 +3,8 @@ openpyxl==3.1.5
 streamlit-echarts==0.4.0
 wasenderapi==0.3.3
 notion-client==2.4.0
-pandas
+boto3==1.42.75
+libsql-client==0.3.1
+pandas==2.3.3
+requests==2.32.5
+streamlit==1.55.0
