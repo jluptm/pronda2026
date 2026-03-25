@@ -25,15 +25,26 @@ try:
 except Exception as e:
     pass
 
-TURSO_URL = os.getenv("TURSO_URL") or secrets.get("turso", {}).get("url")
-TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN") or secrets.get("turso", {}).get("auth_token")
+def get_secret(group, key, env_key):
+    val = os.getenv(env_key)
+    if val: return val
+    try:
+        if group in st.secrets and key in st.secrets[group]:
+            return st.secrets[group][key]
+    except Exception: pass
+    if group in secrets and key in secrets[group]:
+        return secrets[group][key]
+    return None
+
+TURSO_URL = get_secret("turso", "url", "TURSO_URL")
+TURSO_AUTH_TOKEN = get_secret("turso", "auth_token", "TURSO_AUTH_TOKEN")
 
 # Cloudflare R2 Config
-R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY_ID") or secrets.get("aws", {}).get("access_key")
-R2_SECRET_KEY = os.getenv("R2_SECRET_ACCESS_KEY") or secrets.get("aws", {}).get("secret_key")
-R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL") or secrets.get("aws", {}).get("endpoint_url")
-R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL") or secrets.get("aws", {}).get("public_url")
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME") or secrets.get("aws", {}).get("bucket_name", "prondamin-captures")
+R2_ACCESS_KEY = get_secret("aws", "access_key", "R2_ACCESS_KEY_ID")
+R2_SECRET_KEY = get_secret("aws", "secret_key", "R2_SECRET_ACCESS_KEY")
+R2_ENDPOINT_URL = get_secret("aws", "endpoint_url", "R2_ENDPOINT_URL")
+R2_PUBLIC_URL = get_secret("aws", "public_url", "R2_PUBLIC_URL")
+R2_BUCKET_NAME = get_secret("aws", "bucket_name", "R2_BUCKET_NAME") or "prondamin-captures"
 
 # Listas
 CATEGORIAS = ["Ministro Ordenado", "Ministro Licenciado", "Ministro Cristiano", "Ministro Distrital"]
