@@ -409,7 +409,8 @@ elif st.session_state.page == "Registro":
             c6.text_input("Monto DB", value=pago_info.get("MONTO_PAGO") or "", disabled=True)
             c7.text_input("Referencia DB", value=pago_info.get("REFERENCIA") or "", disabled=True)
             if pago_info.get("ARCHIVO_PAGO"):
-                st.image(str(pago_info.get("ARCHIVO_PAGO")), caption="Comprobante en R2 CDN", width=300)
+                with st.expander("Ver Comprobante de Pago"):
+                    st.image(str(pago_info.get("ARCHIVO_PAGO")), caption="Comprobante en R2 CDN", use_container_width=True)
         else:
             uploaded_file = st.file_uploader("Sube tu Capture de Pago (opcional)", type=["jpg", "jpeg", "png", "pdf"])
             if uploaded_file is not None and uploaded_file.file_id != st.session_state.processed_file_id:
