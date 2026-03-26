@@ -48,7 +48,7 @@ R2_BUCKET_NAME = get_secret("aws", "bucket_name", "R2_BUCKET_NAME") or "prondami
 
 # Listas
 CATEGORIAS = ["Ministro Ordenado", "Ministro Licenciado", "Ministro Cristiano", "Ministro Distrital"]
-DISTRITOS = ["Andino", "Centro",  "Lara", "Falcón", "Metropolitano", "Zulia", "Centro Llanos", "Llanos Occidentales" "Yaracuy", "Nor Oriente", "Sur Oriente"]
+DISTRITOS = ["Andino", "Centro",  "Centro Llanos", "Falcón", "Lara", "Llanos Occidentales",  "Metropolitano", "Nor Oriente", "Sur Oriente",  "Yaracuy", "Zulia" ]
 CURSOS = [
     "Ministro Cristiano",
     "Ministro Licenciado",
