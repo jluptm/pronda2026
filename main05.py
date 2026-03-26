@@ -412,54 +412,54 @@ elif st.session_state.page == "Registro":
                 with st.expander("Ver Comprobante de Pago"):
                     st.image(str(pago_info.get("ARCHIVO_PAGO")), caption="Comprobante en R2 CDN", use_container_width=True)
         else:
-            uploaded_file = st.file_uploader("Sube tu Capture de Pago (opcional)", type=["jpg", "jpeg", "png", "pdf"])
-            if uploaded_file is not None and uploaded_file.file_id != st.session_state.processed_file_id:
-                import tempfile
-                from processor import TransactionProcessor
-                
-                with st.spinner("La IA está leyendo tu comprobante..."):
-                    fd, tmp_name = tempfile.mkstemp(suffix=".jpeg", dir=None)
-                    with os.fdopen(fd, 'wb') as f:
-                        f.write(uploaded_file.getvalue())
-                    
-                    try:
-                        proc = TransactionProcessor()
-                        text, success = proc.extract_text(tmp_name)
-                        data = proc.parse_data(text, success)
-                        
-                        if data.get("success"):
-                            # Parseo y validación de Monto
-                            try:
-                                m_str = str(data.get("monto", "")).replace(",", ".").replace("$", "").replace("Bs", "").strip()
-                                parsed_f = float(m_str)
-                                st.session_state.reg_monto = min(parsed_f, 999999.99)
-                            except: pass
+            #uploaded_file = st.file_uploader("Sube tu Capture de Pago (opcional)", type=["jpg", "jpeg", "png", "pdf"])
+            #if uploaded_file is not None and uploaded_file.file_id != st.session_state.processed_file_id:
+            #    import tempfile
+            #    from processor import TransactionProcessor
+            #    
+            #    with st.spinner("La IA está leyendo tu comprobante..."):
+            #        fd, tmp_name = tempfile.mkstemp(suffix=".jpeg", dir=None)
+            #        with os.fdopen(fd, 'wb') as f:
+            #            f.write(uploaded_file.getvalue())
+            #        
+            #        try:
+            #            proc = TransactionProcessor()
+            #            text, success = proc.extract_text(tmp_name)
+            #            data = proc.parse_data(text, success)
+            #            
+            #            if data.get("success"):
+            #                # Parseo y validación de Monto
+            #                try:
+            #                    m_str = str(data.get("monto", "")).replace(",", ".").replace("$", "").replace("Bs", "").strip()
+            #                    parsed_f = float(m_str)
+            #                    st.session_state.reg_monto = min(parsed_f, 999999.99)
+            #                except: pass
 
-                            # Parseo de Fecha
-                            ocr_f = str(data.get("fecha", ""))
-                            if "-" in ocr_f or "/" in ocr_f:
-                                ocr_f = ocr_f.replace("/", "-")
-                                parts = ocr_f.split("-")
-                                try:
-                                    if len(parts) >= 3:
-                                        if len(parts[0]) == 4: st.session_state.reg_fecha = dt.date(int(parts[0]), int(parts[1]), int(parts[2][:2]))
-                                        else: st.session_state.reg_fecha = dt.date(int(parts[2][:4]), int(parts[1]), int(parts[0]))
-                                except: pass
-                                
-                            # Parseo Referencia
-                            st.session_state.reg_ref = str(data.get("referencia", "")).replace(" ", "")[:6]
-                            
-                            st.toast("Datos AI mapeados al calendario y filtros correctamente ✨")
-                    except Exception as e:
-                        st.error("Error al recuperar datos con IA.")
-                    finally:
-                        try:
-                            os.remove(tmp_name)
-                        except: pass
-                
-                # Marca como procesado y actualiza UI manual con trigger
-                st.session_state.processed_file_id = uploaded_file.file_id
-                st.rerun()
+            #                # Parseo de Fecha
+            #                ocr_f = str(data.get("fecha", ""))
+            #                if "-" in ocr_f or "/" in ocr_f:
+            #                    ocr_f = ocr_f.replace("/", "-")
+            #                    parts = ocr_f.split("-")
+            #                    try:
+            #                        if len(parts) >= 3:
+            #                            if len(parts[0]) == 4: st.session_state.reg_fecha = dt.date(int(parts[0]), int(parts[1]), int(parts[2][:2]))
+            #                            else: st.session_state.reg_fecha = dt.date(int(parts[2][:4]), int(parts[1]), int(parts[0]))
+            #                    except: pass
+            #                    
+            #                # Parseo Referencia
+            #                st.session_state.reg_ref = str(data.get("referencia", "")).replace(" ", "")[:6]
+            #                
+            #                st.toast("Datos AI mapeados al calendario y filtros correctamente ✨")
+            #        except Exception as e:
+            #            st.error("Error al recuperar datos con IA.")
+            #        finally:
+            #            try:
+            #                os.remove(tmp_name)
+            #            except: pass
+            #    
+            #    # Marca como procesado y actualiza UI manual con trigger
+            #    st.session_state.processed_file_id = uploaded_file.file_id
+            #    st.rerun()
 
             c5, c6, c7 = st.columns(3)
             try:
