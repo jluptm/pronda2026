@@ -50,9 +50,9 @@ R2_BUCKET_NAME = get_secret("aws", "bucket_name", "R2_BUCKET_NAME") or "prondami
 CATEGORIAS = ["Ministro Ordenado", "Ministro Licenciado", "Ministro Cristiano", "Ministro Distrital"]
 DISTRITOS = ["Andino", "Central", "Llanos", "Lara", "Falcon", "Metropolitano", "Zulia", "Centro-Llano", "Llanos Occidentales"]
 CURSOS = [
-    "Nivel 1 a Ministro Cristiano", "Nivel 2 a Ministro Cristiano",
-    "Nivel 1 a Ministro Licenciado", "Nivel 2 a Ministro Licenciado", "Nivel 3 a Ministro Licenciado",
-    "Nivel 1 a Ministro Ordenado", "Nivel 2 a Ministro Ordenado", "Nivel 3 a Ministro Ordenado"
+    "Ministro Cristiano",
+    "Ministro Licenciado",
+    "Ministro Ordenado"
 ]
 
 # Inicialización S3/R2
