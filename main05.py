@@ -110,6 +110,16 @@ async def _login_admin(username, password):
             return dict(zip(result.columns, result.rows[0]))
         return None
 
+async def _verifica_clave_admin_f(clave):
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        result = await client.execute("SELECT * FROM usuarios_sistema WHERE Clave = ?", [clave])
+        if len(result.rows) > 0:
+            user = dict(zip(result.columns, result.rows[0]))
+            tipo = user.get("TipoDeAcceso", "")
+            if "Financiero" in tipo or "Develop" in tipo or "Total" in tipo:
+                return True
+        return False
+
 async def _insert_registro(values_dict):
     keys = list(values_dict.keys())
     placeholders = ", ".join(["?"] * len(keys))
@@ -165,15 +175,31 @@ async def _load_merged_data(districts):
 def busca_en_turso_pronda26(cedula): return run_async(_busca_en_turso_pronda26(cedula))
 def busca_en_turso_pronda25(cedula): return run_async(_busca_en_turso_pronda25(cedula))
 def login_admin(username, password): return run_async(_login_admin(username, password))
+def verifica_clave_admin_f(clave): return run_async(_verifica_clave_admin_f(clave))
+
+async def _verifica_referencia_unica(referencia):
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        result = await client.execute("SELECT 1 FROM prondamin2026BB WHERE REFERENCIA = ?", [referencia])
+        return len(result.rows) == 0
+
+def verifica_referencia_unica(referencia): return run_async(_verifica_referencia_unica(referencia))
+
 def load_merged_data(districts): return run_async(_load_merged_data(districts))
 def insert_registro(values_dict): return run_async(_insert_registro(values_dict))
-def get_monto_a_pagar(fecha_str):
+def get_monto_a_pagar(fecha_str, modalidad="Virtual"):
     async def _get_monto_a_pagar():
         async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
             try:
                 result = await client.execute("SELECT * FROM APagar")
                 if len(result.rows) > 0:
                     df = pd.DataFrame(result.rows, columns=result.columns)
+                    mod_col = next((c for c in df.columns if 'modalidad' in c.lower()), None)
+                    if mod_col:
+                        # Filtrar por modalidad
+                        df_mod = df[df[mod_col].astype(str).str.lower().str.strip() == modalidad.lower().strip()]
+                        if not df_mod.empty:
+                            df = df_mod
+                            
                     amt_col = next((c for c in df.columns if 'monto' in c.lower() or 'pagar' in c.lower()), None)
                     date_col = next((c for c in df.columns if 'fecha' in c.lower()), None)
                     if amt_col and date_col:
@@ -209,12 +235,22 @@ def base_success_dialog():
         description="Su matriculación en Prondamin2026, ha sido registrada. El status de la misma es PENDIENTE. Cuando se verifique su pago por parte de la Administración de Minec, podrá iniciar el curso correspondiente",
         status="success"
     )
-    if st.button("Cerrar", use_container_width=True):
+    if st.button("Cerrar", use_container_width=True, key="btn_success_close"):
         navigate_to("Inicio")
+        st.rerun()
+
+def base_error_dialog(errores):
+    sac.result(
+        label='Errores de Validación',
+        description='\n\n'.join([f"• {e}" for e in errores]),
+        status='error'
+    )
+    if st.button("Cerrar", use_container_width=True, key="btn_err_close"):
         st.rerun()
 
 dialog_decorator = getattr(st, "dialog", getattr(st, "experimental_dialog", None))
 success_dialog = dialog_decorator("Registro")(base_success_dialog) if dialog_decorator else base_success_dialog
+error_dialog = dialog_decorator("Revisión Necesaria")(base_error_dialog) if dialog_decorator else base_error_dialog
 
 # Layout Header
 c_esp1, c_img1, c_img2, c_esp2 = st.columns([2, 1, 1, 2])
@@ -417,94 +453,134 @@ elif st.session_state.page == "Registro":
             st.write("---")
             st.write("#### Detalles de Pago")
         
-        # Obtenemos monto a pagar de la DB APagar
-        fecha_str_eval = st.session_state.reg_fecha.strftime("%d-%m-%Y") if isinstance(st.session_state.reg_fecha, dt.date) else ""
-        monto_oficial = get_monto_a_pagar(fecha_str_eval)
-        
-        if not read_only:
-            st.info(f"**Monto a Pagar (Oficial):** {monto_oficial:.2f}")
-            forma_pago = st.radio("Forma de pago", ["Pago Móvil", "Transferencia", "Otro"], horizontal=True)
+            modalidad = sac.chip(
+                items=[sac.ChipItem('Virtual'), sac.ChipItem('Presencial')],
+                label='Modalidad',
+                index=0,
+                align='start'
+            )
+            if not modalidad: modalidad = 'Virtual'
+            
+            # Obtenemos monto a pagar de la DB APagar
+            fecha_str_eval = st.session_state.reg_fecha.strftime("%d-%m-%Y") if isinstance(st.session_state.reg_fecha, dt.date) else ""
+            monto_oficial = get_monto_a_pagar(fecha_str_eval, modalidad)
+            st.info(f"**Monto a Pagar ({modalidad}):** {monto_oficial:.2f}")
+            forma_pago = sac.chip(
+                items=[sac.ChipItem('Pago Móvil'), sac.ChipItem('Transferencia'), sac.ChipItem('Otro')],
+                label='Forma de Pago',
+                index=0,
+                align='start'
+            )
+            if not forma_pago: forma_pago = 'Pago Móvil'
         else:
             forma_pago = "Otro"
+            modalidad = "Virtual"
         
         uploaded_file = None
+        banco = ""
+        observacion_pago = ""
+        moneda = ""
+        admin_valid = False
 
         if read_only:
             fecha_pago = dt.date.today()
             monto_pago = 0.0
             referencia_pago = ""
         else:
-            # uploaded_file = st.file_uploader("Sube tu Capture de Pago (opcional)", type=["jpg", "jpeg", "png", "pdf"])
-            # if uploaded_file is not None and uploaded_file.file_id != st.session_state.processed_file_id:
-            #     import tempfile
-            #     from processor import TransactionProcessor
+            if forma_pago == "Otro":
+                clave_admf = st.text_input("Clave AdminF", type="password")
+                if clave_admf:
+                    if verifica_clave_admin_f(clave_admf):
+                        admin_valid = True
+                    else:
+                        st.error("Clave Incorrecta o no autorizada.")
                 
-            #     with st.spinner("La IA está leyendo tu comprobante..."):
-            #         fd, tmp_name = tempfile.mkstemp(suffix=".jpeg", dir=None)
-            #         with os.fdopen(fd, 'wb') as f:
-            #             f.write(uploaded_file.getvalue())
+                if admin_valid:
+                    moneda = sac.chip(
+                        items=[sac.ChipItem('Dólares'), sac.ChipItem('Bolívares')],
+                        label='Pagado en',
+                        index=0,
+                        align='start'
+                    )
+                    if not moneda: moneda = 'Dólares'
                     
-            #         try:
-            #             proc = TransactionProcessor()
-            #             text, success = proc.extract_text(tmp_name)
-            #             data = proc.parse_data(text, success)
-                        
-            #             if data.get("success"):
-            #                 # Parseo y validación de Monto
-            #                 try:
-            #                     m_str = str(data.get("monto", "")).replace(",", ".").replace("$", "").replace("Bs", "").strip()
-            #                     parsed_f = float(m_str)
-            #                     st.session_state.reg_monto = min(parsed_f, 999999.99)
-            #                 except: pass
-
-            #                 # Parseo de Fecha
-            #                 ocr_f = str(data.get("fecha", ""))
-            #                 if "-" in ocr_f or "/" in ocr_f:
-            #                     ocr_f = ocr_f.replace("/", "-")
-            #                     parts = ocr_f.split("-")
-            #                     try:
-            #                         if len(parts) >= 3:
-            #                             if len(parts[0]) == 4: st.session_state.reg_fecha = dt.date(int(parts[0]), int(parts[1]), int(parts[2][:2]))
-            #                             else: st.session_state.reg_fecha = dt.date(int(parts[2][:4]), int(parts[1]), int(parts[0]))
-            #                     except: pass
-                                
-            #                 # Parseo Referencia
-            #                 st.session_state.reg_ref = str(data.get("referencia", "")).replace(" ", "")[:6]
-                            
-            #                 st.toast("Datos AI mapeados al calendario y filtros correctamente ✨")
-            #         except Exception as e:
-            #             st.error("Error al recuperar datos con IA.")
-            #         finally:
-            #             try:
-            #                 os.remove(tmp_name)
-            #             except: pass
+                    observacion_pago = st.text_input("Observación a pago extraordinario")
+                    c5, c6, c7 = st.columns(3)
+                    try:
+                        fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", format="DD-MM-YYYY")
+                    except:
+                        fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha")
+                    monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}")
+                    # Referencia libre
+                    st.session_state.reg_ref = str(st.session_state.reg_ref)
+                    referencia_pago = c7.text_input("Referencia", key="reg_ref", placeholder="Referencia libre")
+                else:
+                    fecha_pago = dt.date.today()
+                    monto_pago = 0.0
+                    referencia_pago = ""
+            else:
+                c5, c6, c7 = st.columns(3)
+                try:
+                    fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", format="DD-MM-YYYY", help="Fecha en la que realizó el pago.")
+                except:
+                    fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha")
+                monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}", help="Monto exacto que pagó. En Bolívares. Máximo 6 dígitos enteros y 2 decimales")
                 
-            #     # Marca como procesado y actualiza UI manual con trigger
-            #     st.session_state.processed_file_id = uploaded_file.file_id
-            #     st.rerun()
+                if forma_pago == "Transferencia":
+                    banco = c5.text_input("Banco Emisor")
+                    st.session_state.reg_ref = ''.join(filter(str.isdigit, st.session_state.reg_ref))[:8]
+                    referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=8, placeholder="########", help="Ingresa los dígitos de su comprobante (mínimo 6 dígitos). Solo números.")
+                else: # Pago Móvil
+                    st.session_state.reg_ref = ''.join(filter(str.isdigit, st.session_state.reg_ref))[:6]
+                    referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=6, placeholder="######", help="Ingresa los últimos 6 dígitos de la referencia. Solo números (máximo 6)")
 
-            c5, c6, c7 = st.columns(3)
-            try:
-                # Calendario formato DD-MM-YYYY
-                fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", format="DD-MM-YYYY", help="Fecha en la que realizó el pago.")
-            except:
-                fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha")
-                
-            monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}", help="Monto exacto que pagó. En Bolívares. Máximo 6 dígitos enteros y 2 decimales")
-            
-            # Referencia (Forzando visual y backend a solo numeros)
-            st.session_state.reg_ref = ''.join(filter(str.isdigit, st.session_state.reg_ref))[:6]
-            referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=6, placeholder="######", help="Ingresa los últimos 6 dígitos de la referencia. Solo números (máximo 6)")
-
-        if read_only:
+        if read_only or (forma_pago == "Otro" and not admin_valid):
             guardar = st.button("Procesar Registro", type="primary", use_container_width=True, disabled=True)
         else:
             guardar = st.button("Procesar Registro", type="primary", use_container_width=True)
         
         if guardar:
-            # Validacion estricta Referencia
-            if not referencia_pago.isdigit() and referencia_pago != "":
-                st.error("La referencia solo puede contener números.")
+            errores = []
+            
+            if not nombres.strip(): errores.append("Nombres es obligatorio.")
+            if not apellidos.strip(): errores.append("Apellidos es obligatorio.")
+            if not categoria.strip(): errores.append("Categoría es obligatoria.")
+            if not distrito.strip(): errores.append("Distrito es obligatorio.")
+            if not curso.strip(): errores.append("Curso a Inscribir es obligatorio.")
+            if not telefonos.strip(): errores.append("Teléfonos es obligatorio.")
+            
+            import re
+            if not emails.strip():
+                errores.append("Correos es obligatorio.")
+            else:
+                lista_emails = [e.strip() for e in emails.replace(",", " ").split() if e.strip()]
+                regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+                for email in lista_emails:
+                    if not re.match(regex, email):
+                        errores.append(f"El correo '{email}' no tiene un formato válido.")
+            
+            if monto_pago <= 0:
+                errores.append("El Monto Pagado es obligatorio y debe ser mayor a 0.")
+                
+            if forma_pago in ["Pago Móvil", "Transferencia"]:
+                if abs(monto_pago - monto_oficial) > 200:
+                    errores.append(f"La diferencia entre el Monto Pagado ({monto_pago}) y a Pagar ({monto_oficial:.2f}) supera el margen permitido de 200.")
+            
+            if not referencia_pago.strip():
+                errores.append("La Referencia es obligatoria.")
+            else:
+                if forma_pago != "Otro":
+                    if not referencia_pago.isdigit():
+                        errores.append("La referencia solo puede contener números para Pago Móvil / Transferencia.")
+                    elif len(referencia_pago.strip()) < 6:
+                        errores.append("La referencia debe tener al menos 6 dígitos para Pago Móvil o Transferencia.")
+                
+                # Check Uniqueness for all cases
+                if not verifica_referencia_unica(referencia_pago):
+                    errores.append(f"La referencia '{referencia_pago}' ya se encuentra registrada en el sistema.")
+                
+            if errores:
+                error_dialog(errores)
             elif user_source == "2026":
                 st.warning("Usted ya está registrado en el Padrón 2026. Los cambios no se han sobrescrito en este entorno Demo.")
             else:
@@ -532,6 +608,10 @@ elif st.session_state.page == "Registro":
                         "FORMA_PAGO": forma_pago, "FECHA_PAGO": fecha_str, "MONTO_PAGO": monto_pago if monto_pago is not None else 0.0,
                         "REFERENCIA": referencia_pago, "ARCHIVO_PAGO": img_path, "CURSO_INSCRITO": curso,
                         "MONTO_A_PAGAR": monto_oficial,
+                        "MODALIDAD": modalidad,
+                        "BancoE": banco,
+                        "ObservaciónPE": observacion_pago,
+                        "pagoEn": moneda,
                         "FECHA_REGISTRO": datetime.now().isoformat(),
                         "Status": "Pendiente"
                     }
