@@ -5,6 +5,7 @@ import tempfile
 from datetime import datetime
 import pandas as pd
 import streamlit as st
+import streamlit_antd_components as sac
 import libsql_client as libsql
 import boto3
 
@@ -52,8 +53,8 @@ DISTRITOS = ["Andino", "Centro",  "Centro Llanos", "Falcón", "Lara", "Llanos Oc
 CURSOS = [
     "Ministro Cristiano",
     "Ministro Licenciado",
-    "Ministro Ordenado"
-]
+    "Ministro Ordenado"]
+
 
 # Inicialización S3/R2
 @st.cache_resource
@@ -202,6 +203,19 @@ if "user_ctx" not in st.session_state: st.session_state.user_ctx = None
 def navigate_to(page_name):
     st.session_state.page = page_name
 
+def base_success_dialog():
+    sac.result(
+        label="Matriculación exitosa",
+        description="Su matriculación en Prondamin2026, ha sido registrada. El status de la misma es PENDIENTE. Cuando se verifique su pago por parte de la Administración de Minec, podrá iniciar el curso correspondiente",
+        status="success"
+    )
+    if st.button("Cerrar", use_container_width=True):
+        navigate_to("Inicio")
+        st.rerun()
+
+dialog_decorator = getattr(st, "dialog", getattr(st, "experimental_dialog", None))
+success_dialog = dialog_decorator("Registro")(base_success_dialog) if dialog_decorator else base_success_dialog
+
 # Layout Header
 c_esp1, c_img1, c_img2, c_esp2 = st.columns([2, 1, 1, 2])
 if os.path.exists(os.path.join("assets", "minecLogo.jpeg")):
@@ -224,10 +238,9 @@ if st.session_state.page != "Inicio":
 # 1. INIT PAGE
 if st.session_state.page == "Inicio":
     st.markdown("### Bienvenidos al Sistema de Gestión Ministerial Prondamin 2026")
-    #st.info("Seleccione una opción a continuación para continuar:")
-    st.image(os.path.join("assets", "enMantenimiento.png"), use_container_width=True)
-    st.stop()
-    
+    st.info("Seleccione una opción a continuación para continuar:")
+    #st.image(os.path.join("assets", "enMantenimiento.png"), use_container_width=True)
+    #st.stop()
     col_nav1, col_nav2 = st.columns(2)
     with col_nav1:
         if st.button("📋 Consulta y Registro", use_container_width=True, type="primary"):
@@ -309,7 +322,7 @@ elif st.session_state.page == "Admin":
                             st.bar_chart(dist_df['Status'].value_counts())
                             
                         with tab2:
-                            st.dataframe(dist_df[['NOMBRES', 'APELLIDOS', 'CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']], use_container_width=True)
+                            st.dataframe(dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']], use_container_width=True)
 
 # 4. REGISTRO Y CONSULTA
 elif st.session_state.page == "Registro":
@@ -367,14 +380,21 @@ elif st.session_state.page == "Registro":
         st.write("---")
         st.markdown("### Formulario de Actualización / Registro 2026")
         
+        read_only = (user_source == "2026")
+        
+        if read_only:
+            sac.result(
+                label='Ya inscrito en espera de revision de pago de la administración.',
+                description='Status=Pendiente',
+                status='warning'
+            )
+        
         # Inicializar Componentes Claves con Session State bindings
         import datetime as dt
         if "reg_fecha" not in st.session_state: st.session_state.reg_fecha = dt.date.today()
         if "reg_monto" not in st.session_state: st.session_state.reg_monto = None
         if "reg_ref" not in st.session_state: st.session_state.reg_ref = ""
         if "processed_file_id" not in st.session_state: st.session_state.processed_file_id = ""
-        
-        read_only = (user_source == "2026")
         
         c1, c2 = st.columns(2)
         nombres = c1.text_input("Nombres", value=defaults.get('NOMBRES'), disabled=read_only)
@@ -387,96 +407,99 @@ elif st.session_state.page == "Registro":
         categoria = c3.selectbox("Categoría", CATEGORIAS, index=cat_idx, disabled=read_only)
         distrito = c4.selectbox("Distrito", DISTRITOS, index=dist_idx, disabled=read_only)
         
-        curso = st.selectbox("Curso a Inscribir", [""] + CURSOS)
+        curso_idx = CURSOS.index(defaults.get("CURSO_INSCRITO")) + 1 if defaults.get("CURSO_INSCRITO") in CURSOS else 0
+        curso = st.selectbox("Curso a Inscribir", [""] + CURSOS, index=curso_idx, disabled=read_only)
         
         emails = st.text_input("Correos Electrónicos", value=defaults.get('EMAIL'), disabled=read_only)
         telefonos = st.text_input("Teléfonos", value=defaults.get('TELEFONOS'), disabled=read_only)
         
-        st.write("---")
-        st.write("#### Detalles de Pago")
+        if not read_only:
+            st.write("---")
+            st.write("#### Detalles de Pago")
         
         # Obtenemos monto a pagar de la DB APagar
         fecha_str_eval = st.session_state.reg_fecha.strftime("%d-%m-%Y") if isinstance(st.session_state.reg_fecha, dt.date) else ""
         monto_oficial = get_monto_a_pagar(fecha_str_eval)
-        st.info(f"**Monto a Pagar (Oficial):** {monto_oficial:.2f}")
         
-        forma_pago = st.radio("Forma de pago", ["Pago Móvil", "Transferencia", "Otro"], horizontal=True)
+        if not read_only:
+            st.info(f"**Monto a Pagar (Oficial):** {monto_oficial:.2f}")
+            forma_pago = st.radio("Forma de pago", ["Pago Móvil", "Transferencia", "Otro"], horizontal=True)
+        else:
+            forma_pago = "Otro"
         
         uploaded_file = None
 
-        if user_source == "2026" and pago_info:
-            st.info("Registro de pago actual en sistema.")
-            c5, c6, c7 = st.columns(3)
-            c5.text_input("Fecha Pago DB", value=pago_info.get("FECHA_PAGO") or "", disabled=True)
-            c6.text_input("Monto DB", value=pago_info.get("MONTO_PAGO") or "", disabled=True)
-            c7.text_input("Referencia DB", value=pago_info.get("REFERENCIA") or "", disabled=True)
-            if pago_info.get("ARCHIVO_PAGO"):
-                with st.expander("Ver Comprobante de Pago"):
-                    st.image(str(pago_info.get("ARCHIVO_PAGO")), caption="Comprobante en R2 CDN", use_container_width=True)
+        if read_only:
+            fecha_pago = dt.date.today()
+            monto_pago = 0.0
+            referencia_pago = ""
         else:
-            #uploaded_file = st.file_uploader("Sube tu Capture de Pago (opcional)", type=["jpg", "jpeg", "png", "pdf"])
-            #if uploaded_file is not None and uploaded_file.file_id != st.session_state.processed_file_id:
-            #    import tempfile
-            #    from processor import TransactionProcessor
-            #    
-            #    with st.spinner("La IA está leyendo tu comprobante..."):
-            #        fd, tmp_name = tempfile.mkstemp(suffix=".jpeg", dir=None)
-            #        with os.fdopen(fd, 'wb') as f:
-            #            f.write(uploaded_file.getvalue())
-            #        
-            #        try:
-            #            proc = TransactionProcessor()
-            #            text, success = proc.extract_text(tmp_name)
-            #            data = proc.parse_data(text, success)
-            #            
-            #            if data.get("success"):
-            #                # Parseo y validación de Monto
-            #                try:
-            #                    m_str = str(data.get("monto", "")).replace(",", ".").replace("$", "").replace("Bs", "").strip()
-            #                    parsed_f = float(m_str)
-            #                    st.session_state.reg_monto = min(parsed_f, 999999.99)
-            #                except: pass
+            # uploaded_file = st.file_uploader("Sube tu Capture de Pago (opcional)", type=["jpg", "jpeg", "png", "pdf"])
+            # if uploaded_file is not None and uploaded_file.file_id != st.session_state.processed_file_id:
+            #     import tempfile
+            #     from processor import TransactionProcessor
+                
+            #     with st.spinner("La IA está leyendo tu comprobante..."):
+            #         fd, tmp_name = tempfile.mkstemp(suffix=".jpeg", dir=None)
+            #         with os.fdopen(fd, 'wb') as f:
+            #             f.write(uploaded_file.getvalue())
+                    
+            #         try:
+            #             proc = TransactionProcessor()
+            #             text, success = proc.extract_text(tmp_name)
+            #             data = proc.parse_data(text, success)
+                        
+            #             if data.get("success"):
+            #                 # Parseo y validación de Monto
+            #                 try:
+            #                     m_str = str(data.get("monto", "")).replace(",", ".").replace("$", "").replace("Bs", "").strip()
+            #                     parsed_f = float(m_str)
+            #                     st.session_state.reg_monto = min(parsed_f, 999999.99)
+            #                 except: pass
 
-            #                # Parseo de Fecha
-            #                ocr_f = str(data.get("fecha", ""))
-            #                if "-" in ocr_f or "/" in ocr_f:
-            #                    ocr_f = ocr_f.replace("/", "-")
-            #                    parts = ocr_f.split("-")
-            #                    try:
-            #                        if len(parts) >= 3:
-            #                            if len(parts[0]) == 4: st.session_state.reg_fecha = dt.date(int(parts[0]), int(parts[1]), int(parts[2][:2]))
-            #                            else: st.session_state.reg_fecha = dt.date(int(parts[2][:4]), int(parts[1]), int(parts[0]))
-            #                    except: pass
-            #                    
-            #                # Parseo Referencia
-            #                st.session_state.reg_ref = str(data.get("referencia", "")).replace(" ", "")[:6]
-            #                
-            #                st.toast("Datos AI mapeados al calendario y filtros correctamente ✨")
-            #        except Exception as e:
-            #            st.error("Error al recuperar datos con IA.")
-            #        finally:
-            #            try:
-            #                os.remove(tmp_name)
-            #            except: pass
-            #    
-            #    # Marca como procesado y actualiza UI manual con trigger
-            #    st.session_state.processed_file_id = uploaded_file.file_id
-            #    st.rerun()
+            #                 # Parseo de Fecha
+            #                 ocr_f = str(data.get("fecha", ""))
+            #                 if "-" in ocr_f or "/" in ocr_f:
+            #                     ocr_f = ocr_f.replace("/", "-")
+            #                     parts = ocr_f.split("-")
+            #                     try:
+            #                         if len(parts) >= 3:
+            #                             if len(parts[0]) == 4: st.session_state.reg_fecha = dt.date(int(parts[0]), int(parts[1]), int(parts[2][:2]))
+            #                             else: st.session_state.reg_fecha = dt.date(int(parts[2][:4]), int(parts[1]), int(parts[0]))
+            #                     except: pass
+                                
+            #                 # Parseo Referencia
+            #                 st.session_state.reg_ref = str(data.get("referencia", "")).replace(" ", "")[:6]
+                            
+            #                 st.toast("Datos AI mapeados al calendario y filtros correctamente ✨")
+            #         except Exception as e:
+            #             st.error("Error al recuperar datos con IA.")
+            #         finally:
+            #             try:
+            #                 os.remove(tmp_name)
+            #             except: pass
+                
+            #     # Marca como procesado y actualiza UI manual con trigger
+            #     st.session_state.processed_file_id = uploaded_file.file_id
+            #     st.rerun()
 
             c5, c6, c7 = st.columns(3)
             try:
                 # Calendario formato DD-MM-YYYY
                 fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", format="DD-MM-YYYY", help="Fecha en la que realizó el pago.")
             except:
-                fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", help="Fecha en la que realizó el pago.")
+                fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha")
                 
             monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}", help="Monto exacto que pagó. En Bolívares. Máximo 6 dígitos enteros y 2 decimales")
             
             # Referencia (Forzando visual y backend a solo numeros)
             st.session_state.reg_ref = ''.join(filter(str.isdigit, st.session_state.reg_ref))[:6]
-            referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=6, placeholder="######", help="Ingresa los últimos 6 dígitos de la referencia. Sólo números (máximo 6)")
+            referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=6, placeholder="######", help="Ingresa los últimos 6 dígitos de la referencia. Solo números (máximo 6)")
 
-        guardar = st.button("Procesar Registro", type="primary", use_container_width=True)
+        if read_only:
+            guardar = st.button("Procesar Registro", type="primary", use_container_width=True, disabled=True)
+        else:
+            guardar = st.button("Procesar Registro", type="primary", use_container_width=True)
         
         if guardar:
             # Validacion estricta Referencia
@@ -509,16 +532,13 @@ elif st.session_state.page == "Registro":
                         "FORMA_PAGO": forma_pago, "FECHA_PAGO": fecha_str, "MONTO_PAGO": monto_pago if monto_pago is not None else 0.0,
                         "REFERENCIA": referencia_pago, "ARCHIVO_PAGO": img_path, "CURSO_INSCRITO": curso,
                         "MONTO_A_PAGAR": monto_oficial,
-                        "FECHA_REGISTRO": datetime.now().isoformat()
+                        "FECHA_REGISTRO": datetime.now().isoformat(),
+                        "Status": "Pendiente"
                     }
                     
                     try:
                         insert_registro(values_dict)
-                        # Reset
-                        st.session_state.reg_monto = None
-                        st.session_state.reg_fecha = dt.date.today()
-                        st.session_state.reg_ref = ""
-                        st.success("¡Registro completado y guardado exitosamente en la Nube Turso!")
+                        success_dialog()
                         st.balloons()
                     except Exception as e:
                         st.error(f"Error base de datos: {e}")
