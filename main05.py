@@ -464,15 +464,15 @@ elif st.session_state.page == "Registro":
             c5, c6, c7 = st.columns(3)
             try:
                 # Calendario formato DD-MM-YYYY
-                fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", format="DD-MM-YYYY")
+                fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", format="DD-MM-YYYY", help="Fecha en la que realizó el pago.")
             except:
-                fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha")
+                fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", help="Fecha en la que realizó el pago.")
                 
-            monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}", help="Máximo 6 dígitos enteros y 2 decimales")
+            monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}", help="Monto exacto que pagó. En Bolívares. Máximo 6 dígitos enteros y 2 decimales")
             
             # Referencia (Forzando visual y backend a solo numeros)
             st.session_state.reg_ref = ''.join(filter(str.isdigit, st.session_state.reg_ref))[:6]
-            referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=6, placeholder="######", help="Solo números (máximo 6)")
+            referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=6, placeholder="######", help="Ingresa los últimos 6 dígitos de la referencia. Sólo números (máximo 6)")
 
         guardar = st.button("Procesar Registro", type="primary", use_container_width=True)
         
