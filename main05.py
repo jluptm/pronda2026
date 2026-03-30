@@ -8,6 +8,7 @@ import streamlit as st
 import streamlit_antd_components as sac
 import libsql_client as libsql
 import boto3
+import altair as alt
 
 try:
     import tomllib
@@ -50,6 +51,35 @@ R2_BUCKET_NAME = get_secret("aws", "bucket_name", "R2_BUCKET_NAME") or "prondami
 # Listas
 CATEGORIAS = ["Ministro Ordenado", "Ministro Licenciado", "Ministro Cristiano", "Ministro Distrital"]
 DISTRITOS = ["Andino", "Centro",  "Centro Llanos", "Falcón", "Lara", "Llanos Occidentales",  "Metropolitano", "Nor Oriente", "Sur Oriente",  "Yaracuy", "Zulia" ]
+BANCOS_OPCIONES = [
+    "0001-Banco Central de Venezuela",
+    "0102-Banco de Venezuela (BDV)",
+    "0104-Banco Venezolano de Crédito (BVC)",
+    "0105-Banco Mercantil",
+    "0108-BBVA Provincial (antes Banco Provincial)",
+    "0114-Bancaribe",
+    "0115-Banco Exterior",
+    "0128-Banco Caroní",
+    "0134-Banesco",
+    "0137-Banco Sofitasa",
+    "0138-Banco Plaza",
+    "0146-Bangente",
+    "0151-Banco Fondo Común (BFC)",
+    "0156-100% Banco",
+    "0157-DelSur Banco Universal",
+    "0163-Banco del Tesoro",
+    "0166-Banco Agrícola de Venezuela",
+    "0168-Bancrecer",
+    "0169-Mi Banco / R4 Banco Microfinanciero",
+    "0171-Banco Activo",
+    "0172-Bancamiga",
+    "0173-Banco Internacional de Desarrollo",
+    "0174-Banplus",
+    "0175-Banco Digital de los Trabajadores (Bicentenario digital)",
+    "0177-BANFANB (Banco de la Fuerza Armada Nacional Bolivariana)",
+    "0178-N58 Banco Digital Microfinanciero",
+    "0191-Banco Nacional de Crédito (BNC)"
+]
 CURSOS = [
     "Ministro Cristiano",
     "Ministro Licenciado",
@@ -130,6 +160,157 @@ async def _insert_registro(values_dict):
         sql = f"INSERT INTO prondamin2026BB ({fields}) VALUES ({placeholders})"
         await client.execute(sql, values)
 
+async def _check_and_create_databank_table():
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        # 1. Crear tabla si no existe
+        await client.execute("""
+            CREATE TABLE IF NOT EXISTS databank (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Tipo TEXT,
+                Fecha TEXT,
+                Referencia TEXT,
+                Descripcion TEXT,
+                Monto REAL,
+                FECHA_CARGA TEXT,
+                'CEDULA-U' TEXT,
+                UNIQUE(Fecha, Referencia, Descripcion)
+            )
+        """)
+        
+        # 2. Asegurar que la columna 'CEDULA-U' existe (por si la tabla ya existía previamente)
+        try:
+            # Consultamos una fila para ver las columnas
+            res = await client.execute("SELECT * FROM databank LIMIT 1")
+            if 'CEDULA-U' not in res.columns:
+                await client.execute("ALTER TABLE databank ADD COLUMN 'CEDULA-U' TEXT")
+        except Exception:
+            pass
+
+async def _process_pagos_2026():
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        # 1. Obtener registros de prondamin2026BB
+        res_reg = await client.execute("SELECT CEDULA, REFERENCIA FROM prondamin2026BB")
+        # Diccionario de reg_ref -> CEDULA (para búsqueda rápida)
+        # Limpiamos reg_ref: solo números, mínimo 4 dígitos
+        registros = {}
+        for row in res_reg.rows:
+            cedula = str(row[0]).strip()
+            ref_raw = ''.join(filter(str.isdigit, str(row[1])))
+            if len(ref_raw) >= 4:
+                registros[ref_raw] = cedula
+
+        # 2. Obtener registros de databank que no tengan CEDULA-U o sea No Asignado
+        res_bank = await client.execute("SELECT id, Referencia FROM databank")
+        
+        statements = []
+        count_assigned = 0
+        
+        for row in res_bank.rows:
+            bid = row[0]
+            bref_raw = ''.join(filter(str.isdigit, str(row[1])))
+            
+            cedula_found = "No Asignado"
+            # Criterio: buscar si alguna reg_ref (4 a 8 dígitos) coincide con el final de bref_raw
+            # Optimizamos: probamos longitudes de 4, 5, 6, 7, 8 al final de bref_raw
+            for r_ref, r_ced in registros.items():
+                if len(r_ref) >= 4 and bref_raw.endswith(r_ref):
+                    cedula_found = r_ced
+                    count_assigned += 1
+                    break
+            
+            statements.append(libsql.Statement(
+                "UPDATE databank SET 'CEDULA-U' = ? WHERE id = ?",
+                [cedula_found, bid]
+            ))
+            
+        if statements:
+            await client.batch(statements)
+        
+        return count_assigned, len(res_bank.rows)
+
+def process_pagos_2026(): return run_async(_process_pagos_2026())
+
+async def _get_databank_df():
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        try:
+            # Cruzamos databank con prondamin2026BB para traer los datos del usuario
+            sql = """
+                SELECT 
+                    d.*, 
+                    p.NOMBRES, 
+                    p.APELLIDOS, 
+                    p.DISTRITO, 
+                    p.MONTO_PAGO, 
+                    p.MONTO_A_PAGAR 
+                FROM databank d
+                LEFT JOIN prondamin2026BB p ON d."CEDULA-U" = p.CEDULA
+            """
+            res = await client.execute(sql)
+            return pd.DataFrame(res.rows, columns=res.columns)
+        except Exception:
+            return pd.DataFrame()
+
+def get_databank_df(): return run_async(_get_databank_df())
+
+async def _get_databank_keys():
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        try:
+            res = await client.execute("SELECT Fecha, Referencia, Descripcion FROM databank")
+            return set((str(r[0]).strip(), str(r[1]).strip(), str(r[2]).strip()) for r in res.rows)
+        except Exception:
+            return set()
+
+def clean_val(val):
+    if pd.isna(val): return ""
+    v = str(val).strip()
+    if v.endswith(".0"): v = v[:-2]
+    return v
+
+async def _insert_bank_data(df_rows):
+    existing_keys = await _get_databank_keys()
+    new_rows = []
+    
+    for _, row in df_rows.iterrows():
+        # Limpieza de datos
+        fecha = clean_val(row['Fecha'])
+        ref = clean_val(row['Referencia'])
+        desc = clean_val(row['Descripción'])
+        
+        key = (fecha, ref, desc)
+        if key not in existing_keys:
+            new_rows.append(row)
+    
+    if not new_rows:
+        return 0
+
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        insert_sql = """
+            INSERT OR IGNORE INTO databank (Tipo, Fecha, Referencia, Descripcion, Monto, FECHA_CARGA)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """
+        now_ts = datetime.now().isoformat()
+        statements = []
+        for row in new_rows:
+            # Asegurar monto numérico
+            try:
+                monto_str = str(row['Monto Bs.']).replace(".", "").replace(",", ".") if isinstance(row['Monto Bs.'], str) else row['Monto Bs.']
+                monto = float(monto_str)
+            except:
+                monto = 0.0
+                
+            statements.append(libsql.Statement(insert_sql, [
+                clean_val(row['Tipo']), clean_val(row['Fecha']), clean_val(row['Referencia']), 
+                clean_val(row['Descripción']), monto, now_ts
+            ]))
+        
+        # Batch insert
+        if statements:
+            await client.batch(statements)
+        return len(statements)
+
+def check_and_create_databank_table(): return run_async(_check_and_create_databank_table())
+def insert_bank_data(df): return run_async(_insert_bank_data(df))
+
 async def _load_merged_data(districts):
     common_cols = ['CEDULA', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'Status', 'REFERENCIA', 'CURSO_INSCRITO', '_source']
     
@@ -171,7 +352,59 @@ async def _load_merged_data(districts):
         
     return merged
 
-# Wrappers para ejecutar asíncronamente en Streamlit
+def load_merged_data(districts): return run_async(_load_merged_data(districts))
+
+def render_admin_charts(df_input):
+    if df_input.empty:
+        st.write("No hay datos suficientes para graficar.")
+        return
+
+    # 1. Gráfico de Dona - Estatus
+    st.write("#### 🥯 Distribución por Estatus")
+    status_counts = df_input['Status'].value_counts().reset_index()
+    status_counts.columns = ['Status', 'Cantidad']
+    
+    donut = alt.Chart(status_counts).mark_arc(innerRadius=60).encode(
+        theta=alt.Theta(field="Cantidad", type="quantitative"),
+        color=alt.Color(field="Status", type="nominal", scale=alt.Scale(scheme='tableau10')),
+        tooltip=['Status', 'Cantidad']
+    ).properties(height=300)
+    st.altair_chart(donut, use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    
+    # 2. Status X Categoría (Grouped Bar)
+    with col1:
+        st.write("#### 📊 Estatus por Categoría")
+        df_cat_stat = df_input[df_input['Status'].isin(['Pendiente', 'Verificado'])]
+        if not df_cat_stat.empty:
+            df_grouped = df_cat_stat.groupby(['CATEGORIA', 'Status']).size().reset_index(name='Total')
+            bar_cat_stat = alt.Chart(df_grouped).mark_bar().encode(
+                x=alt.X('Status:N', title=None),
+                y=alt.Y('Total:Q', title='Registros'),
+                color=alt.Color('Status:N', scale=alt.Scale(scheme='set2')),
+                column=alt.Column('CATEGORIA:N', title='Categoría', header=alt.Header(labelOrient='bottom'))
+            ).properties(height=300, width=60)
+            st.altair_chart(bar_cat_stat)
+        else:
+            st.info("No hay inscritos confirmados.")
+
+    # 3. Inscritos X Categoría (Proporción Inscritos vs Faltantes)
+    with col2:
+        st.write("#### 🎯 Meta: Inscritos vs Padrón")
+        # _source 2026 (✅ Ya Inscritos) vs 2025 (⏳ Pendientes por Inscribir)
+        df_target = df_input.groupby(['CATEGORIA', '_source']).size().reset_index(name='Cantidad')
+        df_target['Estado'] = df_target['_source'].replace({'2026': '✅ Ya Inscritos', '2025': '⏳ Pendientes'})
+        
+        target_chart = alt.Chart(df_target).mark_bar().encode(
+            x=alt.X('CATEGORIA:N', title='Categoría'),
+            y=alt.Y('Cantidad:Q', stack='normalize', title='Progreso (%)'),
+            color=alt.Color('Estado:N', title='Estado', scale=alt.Scale(domain=['✅ Ya Inscritos', '⏳ Pendientes'], range=['#4CAF50', '#FFC107'])),
+            tooltip=['CATEGORIA', 'Estado', 'Cantidad']
+        ).properties(height=300)
+        
+        st.altair_chart(target_chart, use_container_width=True)
+
 def busca_en_turso_pronda26(cedula): return run_async(_busca_en_turso_pronda26(cedula))
 def busca_en_turso_pronda25(cedula): return run_async(_busca_en_turso_pronda25(cedula))
 def login_admin(username, password): return run_async(_login_admin(username, password))
@@ -331,20 +564,231 @@ elif st.session_state.page == "Admin":
         st.markdown(f"## Tablero de Administración - {ctx.get('Nombres')}")
         st.write(f"Rol/Distritos: **{tipo_acceso}**")
         
-        if not admin_districts and tipo_acceso not in ["Total", "Develop", "[Total]", "[Develop]", "Financiero", "[Financiero]"]:
+        is_global = tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]
+        
+        if not admin_districts and not is_global:
             st.warning(f"No hay registros visibles para tu rol.")
-        elif tipo_acceso in ["Total", "Develop", "[Total]", "[Develop]", "Financiero", "[Financiero]"]:
-            st.info(f"Panel {tipo_acceso} cargado. Acceso Global.")
         else:
-            df = load_merged_data(admin_districts)
-            if df.empty:
+            distritos_a_listar = DISTRITOS if is_global else admin_districts
+            df_full = load_merged_data(distritos_a_listar)
+            
+            if df_full.empty:
                 st.write("No hay registros en Turso para tus distritos.")
             else:
-                for dist in admin_districts:
-                    dist_df = df[df['distrito_final'] == dist]
-                    with st.expander(f"Distrito: {dist} ({len(dist_df)} Registros)", expanded=True):
-                        tab1, tab2 = st.tabs(["Estadísticas", "Tabla de Datos"])
+                if is_global:
+                    st.info(f"Panel {tipo_acceso} cargado. Acceso Global.")
+                    # SECCIÓN COMBINADA AL PRINCIPIO
+                    with st.expander("📊 COMBINADO (Todos los Distritos)", expanded=True):
+                        tab1, tab2, tab3 = st.tabs(["Estadísticas Globales", "Tabla Completa", "🏦 Movimientos DataBank"])
+                        with tab1:
+                            # Métricas Globales (Filtradas)
+                            col_a, col_b, col_c = st.columns(3)
+                            inscritos = df_full['Status'].isin(['Pendiente', 'Verificado']).sum()
+                            aprobados = df_full['Status'].eq('Verificado').sum()
+                            
+                            col_a.metric("Muestra Filtrada (Distritos OK)", len(df_full))
+                            col_b.metric("Inscritos 2026 (Global)", inscritos)
+                            col_c.metric("Aprobados (Global)", aprobados)
+                            
+                            # Métricas de Calidad de Datos (Solo para acceso Total/Develop)
+                            if is_global:
+                                st.markdown("---")
+                                st.markdown("#### 🔍 Auditoría de Datos (Registros en Base de Datos)")
+                                # Obtenemos data cruda de 2026 para comparar
+                                df_2026_raw = run_async(_get_df_from_turso("prondamin2026BB"))
+                                total_db_2026 = len(df_2026_raw)
+                                # Registros que no coinciden con la lista oficial de DISTRITOS
+                                df_errores = df_2026_raw[~df_2026_raw['DISTRITO'].isin(DISTRITOS)]
+                                count_errores = len(df_errores)
+                                
+                                col_q1, col_q2 = st.columns(2)
+                                col_q1.metric("Registros Totales en DB (2026)", total_db_2026)
+                                if count_errores > 0:
+                                    col_q2.metric("Distritos por Corregir", count_errores, delta=f"-{count_errores} omitidos", delta_color="inverse")
+                                    st.error(f"⚠️ Atención: Hay **{count_errores}** registros con nombres de distrito no reconocidos. Estos registros han sido excluidos de las estadísticas superiores.")
+                                    
+                                    # Mostrar tabla de registros con errores
+                                    st.write("### 📋 Registros con Errores de Distrito (Para corregir en DB)")
+                                    st.dataframe(df_errores[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'TELEFONOS']], use_container_width=True)
+                                    
+                                    # Mostrar cuáles son los distritos erróneos
+                                    dist_erroneos = df_errores['DISTRITO'].unique().tolist()
+                                    st.write(f"Valores no válidos detectados en DB: **{', '.join(dist_erroneos)}**")
+                                else:
+                                    col_q2.metric("Distritos por Corregir", 0)
+                                    st.success("Toda la data de distritos coincide con la lista oficial.")
+
+                                # --- NUEVA AUDITORÍA DE PAGOS Y REFERENCIAS ---
+                                st.markdown("#### 💳 Auditoría de Pagos y Referencias (2026)")
+                                
+                                # Preparar datos numéricos para cálculo
+                                df_2026_raw['MP_N'] = pd.to_numeric(df_2026_raw['MONTO_PAGO'], errors='coerce').fillna(0)
+                                df_2026_raw['MA_N'] = pd.to_numeric(df_2026_raw['MONTO_A_PAGAR'], errors='coerce').fillna(0)
+                                df_2026_raw['R_STR'] = df_2026_raw['REFERENCIA'].astype(str).str.strip()
+                                
+                                # Condiciones
+                                c1 = df_2026_raw['R_STR'].isin(['', 'None', 'nan', '0']) # No existe
+                                c2 = df_2026_raw['R_STR'].apply(lambda x: len(x) < 6 and x not in ['', 'None', 'nan', '0']) # Corta
+                                c3 = df_2026_raw['MP_N'] == 0 # Monto 0
+                                c4 = (df_2026_raw['MP_N'] - df_2026_raw['MA_N']).abs() > 200 # Diferencia > 200
+                                
+                                df_pago_err = df_2026_raw[c1 | c2 | c3 | c4].copy()
+                                
+                                if not df_pago_err.empty:
+                                    st.warning(f"Se detectaron **{len(df_pago_err)}** registros con posibles inconsistencias en pagos o referencias.")
+                                    # Mostrar tabla detallada
+                                    st.dataframe(df_pago_err[['NOMBRES', 'APELLIDOS', 'CEDULA', 'REFERENCIA', 'MONTO_PAGO', 'MONTO_A_PAGAR', 'DISTRITO']], use_container_width=True)
+                                    
+                                    # Resumen de motivos
+                                    motivos = []
+                                    if c1.any(): motivos.append("Referencias Vacías")
+                                    if c2.any(): motivos.append("Referencias cortas (< 6 dígitos)")
+                                    if c3.any(): motivos.append("Monto Reportado es 0")
+                                    if c4.any(): motivos.append("Discrepancia de monto > 200")
+                                    st.info(f"Motivos detectados: {', '.join(motivos)}")
+                                else:
+                                    st.success("No se detectaron inconsistencias críticas en los pagos de 2026.")
+
+                            st.write("---")
+                            render_admin_charts(df_full)
+                        with tab2:
+                            st.dataframe(df_full[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']], use_container_width=True)
+                        with tab3:
+                            st.markdown("### Tabla databank (Cargas Bancarias)")
+                            df_db = get_databank_df()
+                            if not df_db.empty:
+                                # 1. Ocultar columnas internas
+                                df_show = df_db.copy()
+                                if 'FECHA_CARGA' in df_show.columns: df_show = df_show.drop(columns=['FECHA_CARGA'])
+                                if 'id' in df_show.columns: df_show = df_show.drop(columns=['id'])
+                                
+                                # 2. Ordenar por CEDULA-U
+                                if 'CEDULA-U' in df_show.columns:
+                                    df_show = df_show.sort_values(by='CEDULA-U', ascending=True)
+                                
+                                # 3. Calcular Columnas Adicionales y Asegurar Tipos Numéricos
+                                df_show['MONTO_PAGO'] = pd.to_numeric(df_show['MONTO_PAGO'], errors='coerce').fillna(0)
+                                df_show['MONTO_A_PAGAR'] = pd.to_numeric(df_show['MONTO_A_PAGAR'], errors='coerce').fillna(0)
+                                df_show['Monto'] = pd.to_numeric(df_show['Monto'], errors='coerce').fillna(0)
+                                
+                                # Solo calcular si MONTO_PAGO > 0
+                                df_show['difUpagos'] = 0.0
+                                df_show['difRec'] = 0.0
+                                mask = df_show['MONTO_PAGO'] > 0
+                                df_show.loc[mask, 'difUpagos'] = df_show.loc[mask, 'MONTO_PAGO'] - df_show.loc[mask, 'MONTO_A_PAGAR']
+                                df_show.loc[mask, 'difRec'] = df_show.loc[mask, 'Monto'] - df_show.loc[mask, 'MONTO_PAGO']
+                                
+                                # 4. Estilización combinada
+                                def style_full_table(styler):
+                                    # Resaltado de fila (amarillo vibrante)
+                                    def highlight_row(row):
+                                        val = str(row.get('CEDULA-U', 'No Asignado'))
+                                        is_assigned = val not in ["No Asignado", "", "None", "nan"]
+                                        return ['background-color: #FFFF00; color: #000000;' if is_assigned else '' for _ in row]
+                                    
+                                    # Colores para diferencias (Verde/Rojo)
+                                    def color_diff(val):
+                                        c = 'background-color: #4CAF50; color: white;' if val >= 0 else 'background-color: #F44336; color: white;'
+                                        return c
+
+                                    styler = styler.apply(highlight_row, axis=1)
+                                    styler = styler.applymap(color_diff, subset=['difUpagos', 'difRec'])
+                                    styler = styler.format({'difUpagos': "{:.2f}", 'difRec': "{:.2f}", 'Monto': "{:.2f}", 'MONTO_PAGO': "{:.2f}", 'MONTO_A_PAGAR': "{:.2f}"})
+                                    return styler
+
+                                st.dataframe(style_full_table(df_show.style), use_container_width=True)
+                            else:
+                                st.write("La tabla databank está vacía o no existe aún.")
+                
+                # SECCIÓN CARGA DE DATA BANCARIA (Solo para Develop y Financiero)
+                if tipo_acceso.strip(" []").lower() in ["develop", "financiero"]:
+                    with st.expander("📂 Carga y proceso de data bancaria", expanded=False):
+                        st.markdown("### Importar Movimientos Bancarios (.xlsx)")
+                        st.info("El archivo debe contener los datos a partir de la fila 9. Al subir, se mostrará una vista previa.")
                         
+                        uploaded_xlsx = st.file_uploader("Subir archivo Excel", type=["xlsx"], key="bank_xlsx_uploader")
+                        
+                        if uploaded_xlsx:
+                            try:
+                                # Guardar y mostrar vista previa inmediatamente
+                                if not os.path.exists("uploads"):
+                                    os.makedirs("uploads")
+                                
+                                # Guardar archivo (opcional si ya se lee de memoria, pero lo mantengo por la solicitud previa)
+                                file_path = os.path.join("uploads", uploaded_xlsx.name)
+                                with open(file_path, "wb") as f:
+                                    f.write(uploaded_xlsx.getbuffer())
+                                
+                                # Procesar Excel para Vista Previa
+                                # Header en fila 9 (skiprows=8)
+                                df_bank = pd.read_excel(uploaded_xlsx, sheet_name=0, skiprows=8)
+                                
+                                # Eliminar filas completamente vacías
+                                df_bank = df_bank.dropna(how='all').reset_index(drop=True)
+                                
+                                # Filtrar por Tipo=='NC' y Referencia!='0'
+                                if 'Tipo' in df_bank.columns and 'Referencia' in df_bank.columns:
+                                    df_bank['Tipo'] = df_bank['Tipo'].astype(str).str.strip()
+                                    df_bank['Referencia'] = df_bank['Referencia'].astype(str).str.strip()
+                                    # Quitar .0 si es float
+                                    df_bank['Referencia'] = df_bank['Referencia'].apply(lambda x: x[:-2] if x.endswith(".0") else x)
+                                    
+                                    df_bank = df_bank[(df_bank['Tipo'] == 'NC') & (df_bank['Referencia'] != '0')]
+                                
+                                # Filtrar columnas requeridas
+                                required_cols = ["Tipo", "Fecha", "Referencia", "Descripción", "Monto Bs."]
+                                missing = [c for c in required_cols if c not in df_bank.columns]
+                                
+                                if not missing:
+                                    df_preview = df_bank[required_cols]
+                                    st.write(f"**Vista Previa de Datos ({len(df_preview)} registros encontrados):**")
+                                    st.dataframe(df_preview, use_container_width=True)
+                                    
+                                    # BOTÓN DE PROCESO (Confirmación después de vista previa)
+                                    if st.button("🚀 Confirmar Carga a DataBank", use_container_width=True, type="primary"):
+                                        with st.status("Procesando movimientos bancarios...", expanded=True) as stats:
+                                            st.write("Asegurando tabla de destino y conectando...")
+                                            check_and_create_databank_table()
+                                            
+                                            st.write(f"Preparando {len(df_preview)} registros para verificación...")
+                                            added = insert_bank_data(df_preview)
+                                            
+                                            if added > 0:
+                                                stats.update(label=f"¡Éxito! Se agregaron {added} nuevos registros.", state="complete", expanded=False)
+                                                st.success(f"Se procesaron {len(df_preview)} filas. {added} fueron nuevas.")
+                                                st.session_state.bank_import_success = True # Flag para mostrar el botón de cruce
+                                                st.balloons()
+                                            else:
+                                                stats.update(label="No se detectaron nuevos registros para agregar.", state="complete", expanded=False)
+                                                st.warning("Todos los registros ya existían en la base de datos (según Fecha, Referencia y Descripción).")
+                                                st.session_state.bank_import_success = True # También activar flag aquí para permitir cruce
+                                    
+                                    # MOSTRAR BOTONES DE CRUCE SI HUBO ÉXITO O FORZADO (Fuera de st.button para persistir)
+                                    if st.session_state.get("bank_import_success"):
+                                        st.divider()
+                                        st.markdown("#### Tareas de Post-Procesamiento")
+                                        c_p1, c_p2 = st.columns(2)
+                                        if c_p1.button("🔄 Procesar pagos2026", use_container_width=True):
+                                            with st.spinner("Realizando cruce con prondamin2026BB..."):
+                                                assigned, total = process_pagos_2026()
+                                                st.success(f"Cruce completado: {assigned} de {total} registros vinculados.")
+                                                # No st.rerun inmediatamente para que vean el mensaje
+                                        
+                                        if c_p2.button("🧹 Limpiar Estado de Carga", use_container_width=True):
+                                            st.session_state.bank_import_success = False
+                                            st.rerun()
+                                else:
+                                    st.error(f"El archivo no tiene las columnas requeridas: {missing}")
+                                    st.write("Columnas detectadas:", list(df_bank.columns))
+                                        
+                            except Exception as e:
+                                st.error(f"Error procesando el archivo: {e}")
+
+                # LISTADO POR DISTRITO
+                for dist in distritos_a_listar:
+                    dist_df = df_full[df_full['distrito_final'] == dist]
+                    with st.expander(f"Distrito: {dist} ({len(dist_df)} Registros)", expanded=not is_global):
+                        tab1, tab2 = st.tabs(["Estadísticas", "Tabla de Datos"])
                         with tab1:
                             col_a, col_b, col_c = st.columns(3)
                             inscritos = dist_df['Status'].isin(['Pendiente', 'Verificado']).sum()
@@ -354,8 +798,8 @@ elif st.session_state.page == "Admin":
                             col_b.metric("Inscritos 2026", inscritos)
                             col_c.metric("Aprobados", aprobados)
                             
-                            st.write("Estatus de Inscripción:")
-                            st.bar_chart(dist_df['Status'].value_counts())
+                            st.write("---")
+                            render_admin_charts(dist_df)
                             
                         with tab2:
                             st.dataframe(dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']], use_container_width=True)
@@ -440,11 +884,9 @@ elif st.session_state.page == "Registro":
         cat_idx = CATEGORIAS.index(defaults.get("CATEGORIA")) if defaults.get("CATEGORIA") in CATEGORIAS else 0
         dist_idx = DISTRITOS.index(defaults.get("DISTRITO")) if defaults.get("DISTRITO") in DISTRITOS else 0
         
-        categoria = c3.selectbox("Categoría", CATEGORIAS, index=cat_idx, disabled=read_only)
-        distrito = c4.selectbox("Distrito", DISTRITOS, index=dist_idx, disabled=read_only)
+        categoria = c3.selectbox("Categoría", CATEGORIAS, index=cat_idx, disabled=True)
+        distrito = c4.selectbox("Distrito", DISTRITOS, index=dist_idx, disabled=True)
         
-        curso_idx = CURSOS.index(defaults.get("CURSO_INSCRITO")) + 1 if defaults.get("CURSO_INSCRITO") in CURSOS else 0
-        curso = st.selectbox("Curso a Inscribir", [""] + CURSOS, index=curso_idx, disabled=read_only)
         
         emails = st.text_input("Correos Electrónicos", value=defaults.get('EMAIL'), disabled=read_only)
         telefonos = st.text_input("Teléfonos", value=defaults.get('TELEFONOS'), disabled=read_only)
@@ -527,7 +969,7 @@ elif st.session_state.page == "Registro":
                 monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}", help="Monto exacto que pagó. En Bolívares. Máximo 6 dígitos enteros y 2 decimales")
                 
                 if forma_pago == "Transferencia":
-                    banco = c5.text_input("Banco Emisor")
+                    banco = c5.selectbox("Banco Emisor", options=BANCOS_OPCIONES)
                     st.session_state.reg_ref = ''.join(filter(str.isdigit, st.session_state.reg_ref))[:8]
                     referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=8, placeholder="########", help="Ingresa los dígitos de su comprobante (mínimo 6 dígitos). Solo números.")
                 else: # Pago Móvil
@@ -542,11 +984,18 @@ elif st.session_state.page == "Registro":
         if guardar:
             errores = []
             
+            nombres = nombres or ""
+            apellidos = apellidos or ""
+            categoria = categoria or ""
+            distrito = distrito or ""
+            telefonos = telefonos or ""
+            emails = emails or ""
+            referencia_pago = referencia_pago or ""
+
             if not nombres.strip(): errores.append("Nombres es obligatorio.")
             if not apellidos.strip(): errores.append("Apellidos es obligatorio.")
             if not categoria.strip(): errores.append("Categoría es obligatoria.")
             if not distrito.strip(): errores.append("Distrito es obligatorio.")
-            if not curso.strip(): errores.append("Curso a Inscribir es obligatorio.")
             if not telefonos.strip(): errores.append("Teléfonos es obligatorio.")
             
             import re
@@ -559,6 +1008,7 @@ elif st.session_state.page == "Registro":
                     if not re.match(regex, email):
                         errores.append(f"El correo '{email}' no tiene un formato válido.")
             
+            monto_pago = monto_pago or 0.0
             if monto_pago <= 0:
                 errores.append("El Monto Pagado es obligatorio y debe ser mayor a 0.")
                 
@@ -606,7 +1056,7 @@ elif st.session_state.page == "Registro":
                         "CEDULA": cedula_input, "NOMBRES": nombres, "APELLIDOS": apellidos,
                         "CATEGORIA": categoria, "DISTRITO": distrito, "EMAIL": emails, "TELEFONOS": telefonos,
                         "FORMA_PAGO": forma_pago, "FECHA_PAGO": fecha_str, "MONTO_PAGO": monto_pago if monto_pago is not None else 0.0,
-                        "REFERENCIA": referencia_pago, "ARCHIVO_PAGO": img_path, "CURSO_INSCRITO": curso,
+                        "REFERENCIA": referencia_pago, "ARCHIVO_PAGO": img_path, "CURSO_INSCRITO": "-",
                         "MONTO_A_PAGAR": monto_oficial,
                         "MODALIDAD": modalidad,
                         "BancoE": banco,
