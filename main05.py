@@ -485,6 +485,50 @@ dialog_decorator = getattr(st, "dialog", getattr(st, "experimental_dialog", None
 success_dialog = dialog_decorator("Registro")(base_success_dialog) if dialog_decorator else base_success_dialog
 error_dialog = dialog_decorator("Revisión Necesaria")(base_error_dialog) if dialog_decorator else base_error_dialog
 
+def admin_nuevo_usuario_dialog():
+    st.markdown("### Registro Manual de Usuario 2026")
+    cedula = st.text_input("Cédula / Pasaporte", placeholder="V-12345678").strip()
+    
+    col1, col2 = st.columns(2)
+    nombres = col1.text_input("Nombres")
+    apellidos = col2.text_input("Apellidos")
+    
+    col3, col4 = st.columns(2)
+    categoria = col3.selectbox("Categoría", CATEGORIAS, index=0)
+    distrito = col4.selectbox("Distrito", DISTRITOS, index=0)
+    
+    email = st.text_input("Correo Electrónico")
+    telefonos = st.text_input("Teléfonos")
+    
+    st.info("Nota: El administrador solo registra los datos básicos. El usuario deberá ingresar al portal de consulta y registro para completar su pago.")
+
+    if st.button("Acordin de Guardar", type="primary", use_container_width=True):
+        if not cedula or not nombres or not apellidos:
+            st.error("Cédula, Nombres y Apellidos son obligatorios.")
+        else:
+            with st.spinner("Registrando..."):
+                values_dict = {
+                    "CEDULA": cedula, "NOMBRES": nombres, "APELLIDOS": apellidos,
+                    "CATEGORIA": categoria, "DISTRITO": distrito, "EMAIL": email, "TELEFONOS": telefonos,
+                    "FORMA_PAGO": "-", "FECHA_PAGO": "-", 
+                    "MONTO_PAGO": 0.0, "REFERENCIA": "-", "ARCHIVO_PAGO": "", 
+                    "CURSO_INSCRITO": "-", "MONTO_A_PAGAR": 0.0, "MODALIDAD": "-",
+                    "BancoE": "-", "ObservaciónPE": "Pre-registro Admin", "pagoEn": "-",
+                    "FECHA_REGISTRO": datetime.now().isoformat(), "Status": "No Inscrito"
+                }
+                try:
+                    run_async(_insert_registro(values_dict))
+                    st.success(f"Usuario {nombres} {apellidos} registrado exitosamente como pre-registro.")
+                    st.balloons()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al guardar: {e}")
+
+
+if dialog_decorator:
+    admin_nuevo_usuario_dialog = dialog_decorator("Nuevo Usuario")(admin_nuevo_usuario_dialog)
+
+
 # Layout Header
 c_esp1, c_img1, c_img2, c_esp2 = st.columns([2, 1, 1, 2])
 if os.path.exists(os.path.join("assets", "minecLogo.jpeg")):
@@ -566,7 +610,12 @@ elif st.session_state.page == "Admin":
         
         is_global = tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]
         
+        if is_global and tipo_acceso.strip(" []").lower() != "financiero":
+            if st.button("➕ Nuevo Usuario (Registro Manual)", use_container_width=True, type="primary"):
+                admin_nuevo_usuario_dialog()
+
         if not admin_districts and not is_global:
+
             st.warning(f"No hay registros visibles para tu rol.")
         else:
             distritos_a_listar = DISTRITOS if is_global else admin_districts
@@ -834,6 +883,11 @@ elif st.session_state.page == "Registro":
                 "EMAIL": res_turso25.get('EMAIL2025', res_turso25.get('EMAIL', '')),
                 "TELEFONOS": res_turso25.get('TELEFONOS2025', res_turso25.get('TELEFONOS', ''))
             })
+        else:
+            st.error("No se pudo proceder: La cédula no se encuentra en el Padrón 2025.")
+            st.info("Solo los usuarios registrados en 2025 pueden realizar su automatriculación. Si eres un nuevo usuario y/o tu cedula no está registrada en nuestra base de datos, por favor contacte a su administrador de distrito quien podrá ingresarlo desde el panel admin.")
+            st.stop()
+
         
         st.write(f"### Bienvenid@ {defaults.get('NOMBRES')} {defaults.get('APELLIDOS')}")
         
@@ -860,14 +914,25 @@ elif st.session_state.page == "Registro":
         st.write("---")
         st.markdown("### Formulario de Actualización / Registro 2026")
         
-        read_only = (user_source == "2026")
+        # DETERMINAR SI ES SOLO LECTURA (Si ya tiene pago registrado)
+        has_payment = False
+        if user_source == "2026":
+            ref = str(defaults.get('REFERENCIA', '')).strip()
+            # Si tiene una referencia real (no es guión ni vacío), es read_only
+            if ref and ref not in ["-", "", "None", "nan", "0"]:
+                has_payment = True
+        
+        read_only = has_payment
         
         if read_only:
             sac.result(
                 label='Ya inscrito en espera de revision de pago de la administración.',
-                description='Status=Pendiente',
+                description=f"Status={defaults.get('Status', 'Pendiente')}",
                 status='warning'
             )
+        elif user_source == "2026":
+            st.info("Usted ha sido pre-registrado por el administrador. Por favor complete sus detalles de pago para finalizar su inscripción.")
+
         
         # Inicializar Componentes Claves con Session State bindings
         import datetime as dt
