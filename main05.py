@@ -410,6 +410,35 @@ def busca_en_turso_pronda25(cedula): return run_async(_busca_en_turso_pronda25(c
 def login_admin(username, password): return run_async(_login_admin(username, password))
 def verifica_clave_admin_f(clave): return run_async(_verifica_clave_admin_f(clave))
 
+async def _upsert_user_info(cedula, nombres, apellidos, categoria, email, telefonos, distrito):
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        # Check if exists in 2026
+        res = await client.execute("SELECT Status FROM prondamin2026BB WHERE CEDULA = ?", [cedula])
+        if len(res.rows) > 0:
+            # UPDATE
+            sql = """
+                UPDATE prondamin2026BB 
+                SET NOMBRES = ?, APELLIDOS = ?, CATEGORIA = ?, EMAIL = ?, TELEFONOS = ?
+                WHERE CEDULA = ?
+            """
+            await client.execute(sql, [nombres, apellidos, categoria, email, telefonos, cedula])
+            return "Actualizado"
+        else:
+            # INSERT (from 2025 or new)
+            sql = """
+                INSERT INTO prondamin2026BB 
+                (CEDULA, NOMBRES, APELLIDOS, CATEGORIA, DISTRITO, EMAIL, TELEFONOS, 
+                 FORMA_PAGO, FECHA_PAGO, MONTO_PAGO, REFERENCIA, ARCHIVO_PAGO, 
+                 CURSO_INSCRITO, MONTO_A_PAGAR, MODALIDAD, BancoE, ObservaciónPE, 
+                 pagoEn, FECHA_REGISTRO, Status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '-', '-', 0.0, '-', '', '-', 0.0, '-', '-', 'Editado por Admin', '-', ?, 'No Inscrito')
+            """
+            await client.execute(sql, [cedula, nombres, apellidos, categoria, distrito, email, telefonos, datetime.now().isoformat()])
+            return "Insertado"
+
+def upsert_user_info(cedula, nombres, apellidos, categoria, email, telefonos, distrito):
+    return run_async(_upsert_user_info(cedula, nombres, apellidos, categoria, email, telefonos, distrito))
+
 async def _verifica_referencia_unica(referencia):
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
         result = await client.execute("SELECT 1 FROM prondamin2026BB WHERE REFERENCIA = ?", [referencia])
@@ -837,7 +866,7 @@ elif st.session_state.page == "Admin":
                 for dist in distritos_a_listar:
                     dist_df = df_full[df_full['distrito_final'] == dist]
                     with st.expander(f"Distrito: {dist} ({len(dist_df)} Registros)", expanded=not is_global):
-                        tab1, tab2 = st.tabs(["Estadísticas", "Tabla de Datos"])
+                        tab1, tab2, tab3 = st.tabs(["Estadísticas", "Tabla de Datos", "👤 Editar Usuario"])
                         with tab1:
                             col_a, col_b, col_c = st.columns(3)
                             inscritos = dist_df['Status'].isin(['Pendiente', 'Verificado']).sum()
@@ -852,6 +881,40 @@ elif st.session_state.page == "Admin":
                             
                         with tab2:
                             st.dataframe(dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']], use_container_width=True)
+
+                        with tab3:
+                            st.write(f"### ✏️ Editar Usuario de Distrito: {dist}")
+                            user_list = [f"{r['NOMBRES']} {r['APELLIDOS']} ({r['CEDULA']})" for _, r in dist_df.iterrows()]
+                            selected_label = st.selectbox("Seleccione el usuario a editar:", options=user_list, key=f"edit_sel_{dist}")
+                            
+                            if selected_label:
+                                ced_to_edit = selected_label.split("(")[-1].strip(")")
+                                user_to_edit = dist_df[dist_df['CEDULA'] == ced_to_edit].iloc[0]
+                                
+                                # Formulario sin usar st.form para permitir inputs dinámicos si se requiere, 
+                                # pero st.form es mejor para botones de guardado aislados
+                                with st.form(key=f"form_edit_{ced_to_edit}_{dist}"):
+                                    st.write(f"Editando Cédula: **{ced_to_edit}**")
+                                    e_nombres = st.text_input("Nombres", value=str(user_to_edit.get('NOMBRES', '')))
+                                    e_apellidos = st.text_input("Apellidos", value=str(user_to_edit.get('APELLIDOS', '')))
+                                    
+                                    cat_val = user_to_edit.get('CATEGORIA', '')
+                                    cat_idx = CATEGORIAS.index(cat_val) if cat_val in CATEGORIAS else 0
+                                    e_categoria = st.selectbox("Categoría", CATEGORIAS, index=cat_idx)
+                                    
+                                    e_email = st.text_input("Correos", value=str(user_to_edit.get('EMAIL', '')))
+                                    e_telefonos = st.text_input("Teléfonos", value=str(user_to_edit.get('TELEFONOS', '')))
+                                    
+                                    st.info(f"Distrito fijo: {dist}")
+                                    
+                                    submit_edit = st.form_submit_button("Guardar Cambios", type="primary", use_container_width=True)
+                                    
+                                    if submit_edit:
+                                        with st.spinner("Guardando..."):
+                                            res_msg = upsert_user_info(ced_to_edit, e_nombres, e_apellidos, e_categoria, e_email, e_telefonos, dist)
+                                            st.success(f"Usuario {e_nombres} {e_apellidos} {res_msg} correctamente.")
+                                            st.balloons()
+                                            # st.rerun() # Opcional, dependiendo de si queremos refrescar todo el panel
 
 # 4. REGISTRO Y CONSULTA
 elif st.session_state.page == "Registro":
