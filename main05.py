@@ -752,9 +752,11 @@ elif st.session_state.page == "Admin":
                                 # Solo calcular si MONTO_PAGO > 0
                                 df_show['difUpagos'] = 0.0
                                 df_show['difRec'] = 0.0
+                                df_show['difReal'] = 0.0
                                 mask = df_show['MONTO_PAGO'] > 0
                                 df_show.loc[mask, 'difUpagos'] = df_show.loc[mask, 'MONTO_PAGO'] - df_show.loc[mask, 'MONTO_A_PAGAR']
                                 df_show.loc[mask, 'difRec'] = df_show.loc[mask, 'Monto'] - df_show.loc[mask, 'MONTO_PAGO']
+                                df_show.loc[mask, 'difReal'] = df_show.loc[mask, 'Monto'] - df_show.loc[mask, 'MONTO_A_PAGAR']
                                 
                                 # 4. Estilización combinada
                                 def style_full_table(styler):
@@ -770,8 +772,8 @@ elif st.session_state.page == "Admin":
                                         return c
 
                                     styler = styler.apply(highlight_row, axis=1)
-                                    styler = styler.applymap(color_diff, subset=['difUpagos', 'difRec'])
-                                    styler = styler.format({'difUpagos': "{:.2f}", 'difRec': "{:.2f}", 'Monto': "{:.2f}", 'MONTO_PAGO': "{:.2f}", 'MONTO_A_PAGAR': "{:.2f}"})
+                                    styler = styler.applymap(color_diff, subset=['difUpagos', 'difRec', 'difReal'])
+                                    styler = styler.format({'difUpagos': "{:.2f}", 'difRec': "{:.2f}", 'difReal': "{:.2f}", 'Monto': "{:.2f}", 'MONTO_PAGO': "{:.2f}", 'MONTO_A_PAGAR': "{:.2f}"})
                                     return styler
 
                                 st.dataframe(style_full_table(df_show.style), use_container_width=True)
