@@ -241,7 +241,8 @@ async def _get_databank_df():
                     p.APELLIDOS, 
                     p.DISTRITO, 
                     p.MONTO_PAGO, 
-                    p.MONTO_A_PAGAR 
+                    p.MONTO_A_PAGAR,
+                    p.Status 
                 FROM databank d
                 LEFT JOIN prondamin2026BB p ON d."CEDULA-U" = p.CEDULA
             """
@@ -251,6 +252,21 @@ async def _get_databank_df():
             return pd.DataFrame()
 
 def get_databank_df(): return run_async(_get_databank_df())
+
+async def _bulk_update_status_verificado(cedulas):
+    if not cedulas: return 0
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        statements = []
+        for c in cedulas:
+            statements.append(libsql.Statement(
+                "UPDATE prondamin2026BB SET Status = 'Verificado' WHERE CEDULA = ? AND Status = 'Pendiente'", 
+                [c]
+            ))
+        if statements:
+            await client.batch(statements)
+        return len(statements)
+
+def bulk_update_status_verificado(cedulas): return run_async(_bulk_update_status_verificado(cedulas))
 
 async def _get_databank_keys():
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
@@ -389,21 +405,113 @@ def render_admin_charts(df_input):
         else:
             st.info("No hay inscritos confirmados.")
 
-    # 3. Inscritos X Categoría (Proporción Inscritos vs Faltantes)
+    # 3. Inscritos X Categoría (Proporción Inscritos vs Faltantes) - Mejorado con sub-estatus
     with col2:
-        st.write("#### 🎯 Meta: Inscritos vs Padrón")
-        # _source 2026 (✅ Ya Inscritos) vs 2025 (⏳ Pendientes por Inscribir)
-        df_target = df_input.groupby(['CATEGORIA', '_source']).size().reset_index(name='Cantidad')
-        df_target['Estado'] = df_target['_source'].replace({'2026': '✅ Ya Inscritos', '2025': '⏳ Pendientes'})
+        st.write("#### 🎯 Meta: Progreso de Registro")
+        df_target = df_input.copy()
+        
+        def set_state_detail(row):
+            if row['_source'] == '2025': return '⏳ Faltante'
+            if row['Status'] == 'Verificado': return '🟢 Verificado'
+            return '🟡 Pendiente'
+            
+        df_target['Estado'] = df_target.apply(set_state_detail, axis=1)
         
         target_chart = alt.Chart(df_target).mark_bar().encode(
             x=alt.X('CATEGORIA:N', title='Categoría'),
-            y=alt.Y('Cantidad:Q', stack='normalize', title='Progreso (%)'),
-            color=alt.Color('Estado:N', title='Estado', scale=alt.Scale(domain=['✅ Ya Inscritos', '⏳ Pendientes'], range=['#4CAF50', '#FFC107'])),
-            tooltip=['CATEGORIA', 'Estado', 'Cantidad']
+            y=alt.Y('count():Q', stack='normalize', title='Progreso (%)'),
+            color=alt.Color('Estado:N', title='Estado', scale=alt.Scale(
+                domain=['🟢 Verificado', '🟡 Pendiente', '⏳ Faltante'], 
+                range=['#4CAF50', '#FFC107', '#E0E0E0']
+            )),
+            tooltip=['CATEGORIA', 'Estado', 'count()']
         ).properties(height=300)
         
         st.altair_chart(target_chart, use_container_width=True)
+
+def render_databank_table(df_db):
+    if df_db.empty:
+        st.write("La tabla databank está vacía o no existe aún.")
+        return None
+        
+    df_show = df_db.copy()
+    if 'FECHA_CARGA' in df_show.columns: df_show = df_show.drop(columns=['FECHA_CARGA'])
+    if 'id' in df_show.columns: df_show = df_show.drop(columns=['id'])
+    
+    if 'CEDULA-U' in df_show.columns:
+        df_show = df_show.sort_values(by='CEDULA-U', ascending=True)
+    
+    df_show['MONTO_PAGO'] = pd.to_numeric(df_show['MONTO_PAGO'], errors='coerce').fillna(0)
+    df_show['MONTO_A_PAGAR'] = pd.to_numeric(df_show['MONTO_A_PAGAR'], errors='coerce').fillna(0)
+    df_show['Monto'] = pd.to_numeric(df_show['Monto'], errors='coerce').fillna(0)
+    
+    df_show['difUpagos'] = 0.0
+    df_show['difRec'] = 0.0
+    df_show['difReal'] = 0.0
+    mask = df_show['MONTO_PAGO'] > 0
+    df_show.loc[mask, 'difUpagos'] = df_show.loc[mask, 'MONTO_PAGO'] - df_show.loc[mask, 'MONTO_A_PAGAR']
+    df_show.loc[mask, 'difRec'] = df_show.loc[mask, 'Monto'] - df_show.loc[mask, 'MONTO_PAGO']
+    df_show.loc[mask, 'difReal'] = df_show.loc[mask, 'Monto'] - df_show.loc[mask, 'MONTO_A_PAGAR']
+    
+    # Un registro es Verificado si la diferencia es <= 100 O si ya fue marcado como Verificado en prondamin2026BB
+    df_show['Verificado'] = df_show.apply(
+        lambda row: "✅" if (abs(row['difReal']) <= 100 or str(row.get('Status', '')) == 'Verificado') else "❌", 
+        axis=1
+    )
+    
+    def highlight_row(row):
+        val = str(row.get('CEDULA-U', 'No Asignado'))
+        is_assigned = val not in ["No Asignado", "", "None", "nan"]
+        is_verified = row.get('Verificado') == "✅"
+        if is_assigned:
+            if is_verified:
+                return ['background-color: #4CAF50; color: white;' for _ in row]
+            else:
+                return ['background-color: #FFFF00; color: #000000;' for _ in row]
+        return ['' for _ in row]
+    
+    def color_diff(val):
+        return 'background-color: #4CAF50; color: white;' if val >= 0 else 'background-color: #F44336; color: white;'
+
+    styler = df_show.style.apply(highlight_row, axis=1)
+    styler = styler.applymap(color_diff, subset=['difUpagos', 'difRec', 'difReal'])
+    styler = styler.format({'difUpagos': "{:.2f}", 'difRec': "{:.2f}", 'difReal': "{:.2f}", 'Monto': "{:.2f}", 'MONTO_PAGO': "{:.2f}", 'MONTO_A_PAGAR': "{:.2f}"})
+    
+    st.dataframe(styler, use_container_width=True)
+    return df_show
+
+def style_user_table(styler):
+    def highlight_status(row):
+        status = row.get('Status', '')
+        if status == 'Verificado':
+            return ['background-color: #4CAF50; color: white;' for _ in row]
+        elif status == 'Pendiente':
+            return ['background-color: #FFFF00; color: #000000;' for _ in row]
+        return ['' for _ in row]
+    return styler.apply(highlight_status, axis=1)
+
+@st.dialog("Confirmar Registro Manual")
+def confirm_manual_verification(to_list):
+    st.write(f"¿Desea cambiar a **Verificado** estas {len(to_list)} cuentas?")
+    # Mostrar resumen con formato y columna difReal
+    df_resumen = to_list[['NOMBRES', 'Referencia', 'Monto', 'difReal']].copy()
+    st.dataframe(
+        df_resumen.style.format({'Monto': '{:.2f}', 'difReal': '{:.2f}'}),
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    c1, c2 = st.columns(2)
+    if c1.button("✅ SI", use_container_width=True, type="primary"):
+        cedulas = to_list['CEDULA-U'].tolist()
+        updated = bulk_update_status_verificado(cedulas)
+        st.success(f"✅ ¡Cambio de status realizado! Se han verificado {updated} registros correctamente.")
+        st.balloons()
+        import time
+        time.sleep(3)
+        st.rerun()
+    if c2.button("❌ No", use_container_width=True):
+        st.rerun()
 
 def busca_en_turso_pronda26(cedula): return run_async(_busca_en_turso_pronda26(cedula))
 def busca_en_turso_pronda25(cedula): return run_async(_busca_en_turso_pronda25(cedula))
@@ -661,12 +769,13 @@ elif st.session_state.page == "Admin":
                         with tab1:
                             # Métricas Globales (Filtradas)
                             col_a, col_b, col_c = st.columns(3)
-                            inscritos = df_full['Status'].isin(['Pendiente', 'Verificado']).sum()
-                            aprobados = df_full['Status'].eq('Verificado').sum()
                             
-                            col_a.metric("Muestra Filtrada (Distritos OK)", len(df_full))
-                            col_b.metric("Inscritos 2026 (Global)", inscritos)
-                            col_c.metric("Aprobados (Global)", aprobados)
+                            p_pending = df_full['Status'].eq('Pendiente').sum()
+                            p_verified = df_full['Status'].eq('Verificado').sum()
+                            
+                            col_a.metric("Total Muestra Filtrada", len(df_full))
+                            col_b.metric("🟡 Inscritos Pendientes", p_pending)
+                            col_c.metric("🟢 Inscritos Verificados", p_verified)
                             
                             # Métricas de Calidad de Datos (Solo para acceso Total/Develop)
                             if is_global:
@@ -708,7 +817,7 @@ elif st.session_state.page == "Admin":
                                 c1 = df_2026_raw['R_STR'].isin(['', 'None', 'nan', '0']) # No existe
                                 c2 = df_2026_raw['R_STR'].apply(lambda x: len(x) < 6 and x not in ['', 'None', 'nan', '0']) # Corta
                                 c3 = df_2026_raw['MP_N'] == 0 # Monto 0
-                                c4 = (df_2026_raw['MP_N'] - df_2026_raw['MA_N']).abs() > 200 # Diferencia > 200
+                                c4 = (df_2026_raw['MP_N'] - df_2026_raw['MA_N']).abs() > 100 # Diferencia > 100
                                 
                                 df_pago_err = df_2026_raw[c1 | c2 | c3 | c4].copy()
                                 
@@ -722,7 +831,7 @@ elif st.session_state.page == "Admin":
                                     if c1.any(): motivos.append("Referencias Vacías")
                                     if c2.any(): motivos.append("Referencias cortas (< 6 dígitos)")
                                     if c3.any(): motivos.append("Monto Reportado es 0")
-                                    if c4.any(): motivos.append("Discrepancia de monto > 200")
+                                    if c4.any(): motivos.append("Discrepancia de monto > 100")
                                     st.info(f"Motivos detectados: {', '.join(motivos)}")
                                 else:
                                     st.success("No se detectaron inconsistencias críticas en los pagos de 2026.")
@@ -730,58 +839,14 @@ elif st.session_state.page == "Admin":
                             st.write("---")
                             render_admin_charts(df_full)
                         with tab2:
-                            st.dataframe(df_full[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']], use_container_width=True)
+                            df_table_global = df_full[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
+                            st.dataframe(style_user_table(df_table_global.style), use_container_width=True)
                         with tab3:
                             st.markdown("### Tabla databank (Cargas Bancarias)")
-                            df_db = get_databank_df()
-                            if not df_db.empty:
-                                # 1. Ocultar columnas internas
-                                df_show = df_db.copy()
-                                if 'FECHA_CARGA' in df_show.columns: df_show = df_show.drop(columns=['FECHA_CARGA'])
-                                if 'id' in df_show.columns: df_show = df_show.drop(columns=['id'])
-                                
-                                # 2. Ordenar por CEDULA-U
-                                if 'CEDULA-U' in df_show.columns:
-                                    df_show = df_show.sort_values(by='CEDULA-U', ascending=True)
-                                
-                                # 3. Calcular Columnas Adicionales y Asegurar Tipos Numéricos
-                                df_show['MONTO_PAGO'] = pd.to_numeric(df_show['MONTO_PAGO'], errors='coerce').fillna(0)
-                                df_show['MONTO_A_PAGAR'] = pd.to_numeric(df_show['MONTO_A_PAGAR'], errors='coerce').fillna(0)
-                                df_show['Monto'] = pd.to_numeric(df_show['Monto'], errors='coerce').fillna(0)
-                                
-                                # Solo calcular si MONTO_PAGO > 0
-                                df_show['difUpagos'] = 0.0
-                                df_show['difRec'] = 0.0
-                                df_show['difReal'] = 0.0
-                                mask = df_show['MONTO_PAGO'] > 0
-                                df_show.loc[mask, 'difUpagos'] = df_show.loc[mask, 'MONTO_PAGO'] - df_show.loc[mask, 'MONTO_A_PAGAR']
-                                df_show.loc[mask, 'difRec'] = df_show.loc[mask, 'Monto'] - df_show.loc[mask, 'MONTO_PAGO']
-                                df_show.loc[mask, 'difReal'] = df_show.loc[mask, 'Monto'] - df_show.loc[mask, 'MONTO_A_PAGAR']
-                                
-                                # 4. Estilización combinada
-                                def style_full_table(styler):
-                                    # Resaltado de fila (amarillo vibrante)
-                                    def highlight_row(row):
-                                        val = str(row.get('CEDULA-U', 'No Asignado'))
-                                        is_assigned = val not in ["No Asignado", "", "None", "nan"]
-                                        return ['background-color: #FFFF00; color: #000000;' if is_assigned else '' for _ in row]
-                                    
-                                    # Colores para diferencias (Verde/Rojo)
-                                    def color_diff(val):
-                                        c = 'background-color: #4CAF50; color: white;' if val >= 0 else 'background-color: #F44336; color: white;'
-                                        return c
-
-                                    styler = styler.apply(highlight_row, axis=1)
-                                    styler = styler.applymap(color_diff, subset=['difUpagos', 'difRec', 'difReal'])
-                                    styler = styler.format({'difUpagos': "{:.2f}", 'difRec': "{:.2f}", 'difReal': "{:.2f}", 'Monto': "{:.2f}", 'MONTO_PAGO': "{:.2f}", 'MONTO_A_PAGAR': "{:.2f}"})
-                                    return styler
-
-                                st.dataframe(style_full_table(df_show.style), use_container_width=True)
-                            else:
-                                st.write("La tabla databank está vacía o no existe aún.")
+                            render_databank_table(get_databank_df())
                 
-                # SECCIÓN CARGA DE DATA BANCARIA (Solo para Develop y Financiero)
-                if tipo_acceso.strip(" []").lower() in ["develop", "financiero"]:
+                # SECCIÓN CARGA DE DATA BANCARIA (Solo para Total, Develop y Financiero)
+                if tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]:
                     with st.expander("📂 Carga y proceso de data bancaria", expanded=False):
                         st.markdown("### Importar Movimientos Bancarios (.xlsx)")
                         st.info("El archivo debe contener los datos a partir de la fila 9. Al subir, se mostrará una vista previa.")
@@ -852,7 +917,30 @@ elif st.session_state.page == "Admin":
                                             with st.spinner("Realizando cruce con prondamin2026BB..."):
                                                 assigned, total = process_pagos_2026()
                                                 st.success(f"Cruce completado: {assigned} de {total} registros vinculados.")
-                                                # No st.rerun inmediatamente para que vean el mensaje
+                                                st.session_state.show_process_results = True
+                                        
+                                        if st.session_state.get("show_process_results"):
+                                            st.divider()
+                                            st.markdown("### 📋 Resultados del Cruce (Tabla DataBank)")
+                                            df_results = render_databank_table(get_databank_df())
+                                            
+                                            if df_results is not None:
+                                                if st.button("🚀 registrar los Verificados", use_container_width=True, type="primary"):
+                                                    # Filtrar cedulas con Verificado == ✅ y Cedula-U != No Asignado
+                                                    to_verify = df_results[
+                                                        (df_results['CEDULA-U'] != "No Asignado") & 
+                                                        (df_results['Verificado'] == "✅")
+                                                    ]['CEDULA-U'].tolist()
+                                                    
+                                                    if to_verify:
+                                                        with st.spinner(f"Actualizando {len(to_verify)} usuarios..."):
+                                                            updated = bulk_update_status_verificado(to_verify)
+                                                            st.success(f"Se han actualizado {updated} usuarios a status 'Verificado'.")
+                                                            st.balloons()
+                                                            st.session_state.show_process_results = False
+                                                            # st.rerun() # Opcional para refrescar estadisticas inmediatamente
+                                                    else:
+                                                        st.warning("No se encontraron registros asignados con el sello ✅ para registrar.")
                                         
                                         if c_p2.button("🧹 Limpiar Estado de Carga", use_container_width=True):
                                             st.session_state.bank_import_success = False
@@ -863,6 +951,65 @@ elif st.session_state.page == "Admin":
                                         
                             except Exception as e:
                                 st.error(f"Error procesando el archivo: {e}")
+                                            
+                # SECCIÓN VERIFICACIÓN MANUAL (Total, Financiero, Develop)
+                if tipo_acceso.strip(" []").lower() in ["total", "financiero", "develop"]:
+                    with st.expander("✅ Verificación Manual", expanded=False):
+                        st.markdown("### Databank Verificación Manual")
+                        st.info("Aquí se muestran los registros que no pudieron ser verificados automáticamente (❌).")
+                        
+                        df_db_raw = get_databank_df()
+                        if not df_db_raw.empty:
+                            # Procesamiento mínimo para mostrar en el editor
+                            df_m = df_db_raw.copy()
+                            df_m['Monto'] = pd.to_numeric(df_m['Monto'], errors='coerce').fillna(0)
+                            df_m['MONTO_A_PAGAR'] = pd.to_numeric(df_m['MONTO_A_PAGAR'], errors='coerce').fillna(0)
+                            df_m['difReal'] = df_m['Monto'] - df_m['MONTO_A_PAGAR']
+                            
+                            # Un registro está verificado si la diferencia es <= 100 o si el Status ya es 'Verificado' en prondamin2026BB
+                            df_m['Verificado_Check'] = df_m.apply(
+                                lambda row: abs(row['difReal']) <= 100 or str(row.get('Status', '')) == 'Verificado', 
+                                axis=1
+                            )
+                            
+                            # Filtrar solo los NO verificados y que tengan CEDULA-U asignada
+                            df_to_edit = df_m[(df_m['Verificado_Check'] == False) & (df_m['CEDULA-U'] != "No Asignado")].copy()
+                            
+                            if not df_to_edit.empty:
+                                df_to_edit['Manual'] = False  # Columna para el checkbox
+                                
+                                # Columnas a mostrar
+                                cols_show = ['NOMBRES', 'APELLIDOS', 'CEDULA-U', 'Fecha', 'Referencia', 'Monto', 'MONTO_A_PAGAR', 'difReal', 'Manual']
+                                
+                                edited_df = st.data_editor(
+                                    df_to_edit[cols_show],
+                                    column_config={
+                                        "Manual": st.column_config.CheckboxColumn("Seleccionar", help="Marque para verificar manualmente"),
+                                        "NOMBRES": st.column_config.Column(disabled=True),
+                                        "APELLIDOS": st.column_config.Column(disabled=True),
+                                        "CEDULA-U": st.column_config.Column(disabled=True),
+                                        "Fecha": st.column_config.Column(disabled=True),
+                                        "Referencia": st.column_config.Column(disabled=True),
+                                        "Monto": st.column_config.Column(disabled=True),
+                                        "MONTO_A_PAGAR": st.column_config.Column(disabled=True),
+                                        "difReal": st.column_config.Column(disabled=True),
+                                    },
+                                    hide_index=True,
+                                    use_container_width=True,
+                                    key="editor_manual"
+                                )
+                                
+                                if st.button("🚀 Cambio Manual a Verificado", use_container_width=True, type="primary"):
+                                    to_verify = edited_df[edited_df['Manual'] == True]
+                                    if not to_verify.empty:
+                                        confirm_manual_verification(to_verify)
+                                    else:
+                                        st.warning("No ha seleccionado ningún registro.")
+                            else:
+                                st.success("No hay registros pendientes de verificación manual con cédula asignada.")
+                        else:
+                            st.write("No hay datos en Databank.")
+
 
                 # LISTADO POR DISTRITO
                 for dist in distritos_a_listar:
@@ -871,18 +1018,20 @@ elif st.session_state.page == "Admin":
                         tab1, tab2, tab3 = st.tabs(["Estadísticas", "Tabla de Datos", "👤 Editar Usuario"])
                         with tab1:
                             col_a, col_b, col_c = st.columns(3)
-                            inscritos = dist_df['Status'].isin(['Pendiente', 'Verificado']).sum()
-                            aprobados = dist_df['Status'].eq('Verificado').sum()
+                            
+                            d_pending = dist_df['Status'].eq('Pendiente').sum()
+                            d_verified = dist_df['Status'].eq('Verificado').sum()
                             
                             col_a.metric("Total Padrón 2025", len(dist_df))
-                            col_b.metric("Inscritos 2026", inscritos)
-                            col_c.metric("Aprobados", aprobados)
+                            col_b.metric("🟡 Pendientes", d_pending)
+                            col_c.metric("🟢 Verificados", d_verified)
                             
                             st.write("---")
                             render_admin_charts(dist_df)
                             
                         with tab2:
-                            st.dataframe(dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']], use_container_width=True)
+                            df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
+                            st.dataframe(style_user_table(df_table_dist.style), use_container_width=True)
 
                         with tab3:
                             st.write(f"### ✏️ Editar Usuario de Distrito: {dist}")
@@ -1143,8 +1292,8 @@ elif st.session_state.page == "Registro":
                 errores.append("El Monto Pagado es obligatorio y debe ser mayor a 0.")
                 
             if forma_pago in ["Pago Móvil", "Transferencia"]:
-                if abs(monto_pago - monto_oficial) > 200:
-                    errores.append(f"La diferencia entre el Monto Pagado ({monto_pago}) y a Pagar ({monto_oficial:.2f}) supera el margen permitido de 200.")
+                if abs(monto_pago - monto_oficial) > 100:
+                    errores.append(f"La diferencia entre el Monto Pagado ({monto_pago}) y a Pagar ({monto_oficial:.2f}) supera el margen permitido de 100.")
             
             if not referencia_pago.strip():
                 errores.append("La Referencia es obligatoria.")
