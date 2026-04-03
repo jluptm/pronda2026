@@ -547,6 +547,34 @@ async def _upsert_user_info(cedula, nombres, apellidos, categoria, email, telefo
 def upsert_user_info(cedula, nombres, apellidos, categoria, email, telefonos, distrito):
     return run_async(_upsert_user_info(cedula, nombres, apellidos, categoria, email, telefonos, distrito))
 
+async def _upsert_full_user_admin(data):
+    cedula = data.get('CEDULA')
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        # Existe?
+        res = await client.execute("SELECT 1 FROM prondamin2026BB WHERE CEDULA = ?", [cedula])
+        
+        # Preparación de valores (asegurando tipos correctos)
+        fields = list(data.keys())
+        values = list(data.values())
+        
+        if len(res.rows) > 0:
+            # UPDATE
+            update_parts = ", ".join([f"{f} = ?" for f in fields if f != 'CEDULA'])
+            sql = f"UPDATE prondamin2026BB SET {update_parts} WHERE CEDULA = ?"
+            params = [v for f, v in zip(fields, values) if f != 'CEDULA'] + [cedula]
+            await client.execute(sql, params)
+            return "Actualizado"
+        else:
+            # INSERT
+            placeholders = ", ".join(["?"] * len(fields))
+            cols = ", ".join(fields)
+            sql = f"INSERT INTO prondamin2026BB ({cols}) VALUES ({placeholders})"
+            await client.execute(sql, values)
+            return "Insertado"
+
+def upsert_full_user_admin(data):
+    return run_async(_upsert_full_user_admin(data))
+
 async def _verifica_referencia_unica(referencia):
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
         result = await client.execute("SELECT 1 FROM prondamin2026BB WHERE REFERENCIA = ?", [referencia])
@@ -662,8 +690,126 @@ def admin_nuevo_usuario_dialog():
                     st.error(f"Error al guardar: {e}")
 
 
-if dialog_decorator:
-    admin_nuevo_usuario_dialog = dialog_decorator("Nuevo Usuario")(admin_nuevo_usuario_dialog)
+@st.dialog("Edición Administrativa de Usuario")
+def admin_manual_edit_dialog():
+    cedula = st.text_input("Ingrese la Cédula (ID) del usuario:", placeholder="Ej. 12345678").strip()
+    if not cedula:
+        st.info("Por favor, ingrese una cédula para comenzar.")
+        return
+        
+    # Buscar datos
+    res26 = busca_en_turso_pronda26(cedula)
+    res25 = busca_en_turso_pronda25(cedula)
+    
+    user_data = {}
+    is_new = False
+    
+    if isinstance(res26, pd.DataFrame) and not res26.empty:
+        user_data = res26.iloc[0].to_dict()
+    elif res25:
+        user_data = {
+            "CEDULA": cedula,
+            "NOMBRES": res25.get('NOMBRES', ''),
+            "APELLIDOS": res25.get('APELLIDOS', ''),
+            "CATEGORIA": res25.get('CATEGORIA', ''),
+            "DISTRITO": res25.get('DISTRITO', ''),
+            "EMAIL": res25.get('EMAIL', ''),
+            "TELEFONOS": res25.get('TELEFONOS', ''),
+            "Status": "No Inscrito"
+        }
+        is_new = True
+    else:
+        st.error("Cédula no encontrada en 2025 ni 2026.")
+        return
+        
+    st.write(f"### Edición Manual: {user_data.get('NOMBRES')} {user_data.get('APELLIDOS')}")
+    
+    # Formulario
+    with st.form("form_manual_edit_admin"):
+        col_u, col_p = st.columns(2)
+        with col_u:
+            st.markdown("#### 👤 Datos de Usuario")
+            nombres = st.text_input("Nombres", value=str(user_data.get('NOMBRES', '')))
+            apellidos = st.text_input("Apellidos", value=str(user_data.get('APELLIDOS', '')))
+            
+            curr_cat = user_data.get('CATEGORIA', '')
+            cat_idx = CATEGORIAS.index(curr_cat) if curr_cat in CATEGORIAS else 0
+            categoria = st.selectbox("Categoría", CATEGORIAS, index=cat_idx)
+            
+            curr_dist = user_data.get('DISTRITO', '')
+            dist_idx = DISTRITOS.index(curr_dist) if curr_dist in DISTRITOS else 0
+            distrito = st.selectbox("Distrito", DISTRITOS, index=dist_idx)
+            
+            email = st.text_input("Email", value=str(user_data.get('EMAIL', '')))
+            telefonos = st.text_input("Teléfonos", value=str(user_data.get('TELEFONOS', '')))
+            
+        with col_p:
+            st.markdown("#### 💰 Datos de Pago")
+            status_actual = user_data.get('Status', 'No Inscrito')
+            is_verified = (status_actual == 'Verificado')
+            
+            if is_verified:
+                st.info("✅ El pago ya ha sido asignado y verificado. Campos de pago bloqueados.")
+            
+            modalidad = st.selectbox("Modalidad", ["Presencial", "Virtual"], 
+                                     index=0 if user_data.get('MODALIDAD') == "Presencial" else 1, 
+                                     disabled=is_verified)
+            
+            monto_a_pagar = st.number_input("Monto a Pagar", value=float(user_data.get('MONTO_A_PAGAR', 0.0)), 
+                                            disabled=is_verified)
+            
+            formas = ["Transferencia", "Pago Móvil", "Efectivo", "Otro"]
+            curr_forma = user_data.get('FORMA_PAGO', 'Transferencia')
+            forma_pago = st.selectbox("Forma de Pago", formas, 
+                                      index=formas.index(curr_forma) if curr_forma in (formas) else 0,
+                                      disabled=is_verified)
+            
+            fecha_pago = st.text_input("Fecha de Pago", value=str(user_data.get('FECHA_PAGO', '-')), 
+                                      disabled=is_verified)
+            
+            monto_pagado = st.number_input("Monto Pagado", value=float(user_data.get('MONTO_PAGO', 0.0)), 
+                                         disabled=is_verified)
+            
+            referencia = st.text_input("Referencia", value=str(user_data.get('REFERENCIA', '-')), 
+                                      disabled=is_verified)
+            
+            # Banco Emisor
+            curr_banco = user_data.get('BancoE', '-')
+            b_idx = 0
+            if curr_banco in BANCOS_OPCIONES: b_idx = BANCOS_OPCIONES.index(curr_banco)
+            banco = st.selectbox("Banco Emisor", BANCOS_OPCIONES, index=b_idx, disabled=is_verified)
+            
+            pagado_en = st.text_input("Pagado En", value=str(user_data.get('pagoEn', '-')), 
+                                     disabled=is_verified)
+            
+            observacion = st.text_area("Observación", value=str(user_data.get('ObservaciónPE', '')), 
+                                      disabled=is_verified)
+
+        if st.form_submit_button("💾 Guardar Cambios en Registro", type="primary", use_container_width=True):
+            # Guardar Todo
+            all_fields = {
+                "CEDULA": cedula, "NOMBRES": nombres, "APELLIDOS": apellidos, "CATEGORIA": categoria,
+                "DISTRITO": distrito, "EMAIL": email, "TELEFONOS": telefonos,
+                "MODALIDAD": modalidad, "MONTO_A_PAGAR": monto_a_pagar, "FORMA_PAGO": forma_pago,
+                "FECHA_PAGO": fecha_pago, "MONTO_PAGO": monto_pagado, "REFERENCIA": referencia,
+                "BancoE": banco, "pagoEn": pagado_en, "ObservaciónPE": observacion,
+                "Status": "Pendiente" if is_new or status_actual == "No Inscrito" else status_actual
+            }
+            if is_new:
+                all_fields["FECHA_REGISTRO"] = datetime.now().isoformat()
+                all_fields["ARCHIVO_PAGO"] = ""
+                all_fields["CURSO_INSCRITO"] = "-"
+                
+            try:
+                upsert_full_user_admin(all_fields)
+                st.success("¡Registro actualizado exitosamente!")
+                st.balloons()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error al guardar: {e}")
+
+if st.session_state.page == "Admin": # Dummy place to keep it for decoration if needed, but st.dialog doesn't need placement
+    pass
 
 
 # Layout Header
@@ -748,8 +894,14 @@ elif st.session_state.page == "Admin":
         is_global = tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]
         
         if is_global and tipo_acceso.strip(" []").lower() != "financiero":
-            if st.button("➕ Nuevo Usuario (Registro Manual)", use_container_width=True, type="primary"):
+            c_adm1, c_adm2 = st.columns(2)
+            if c_adm1.button("➕ Nuevo Usuario (Padrón 2026)", use_container_width=True):
                 admin_nuevo_usuario_dialog()
+            if c_adm2.button("👤 Editar Usuario (Registro Manual)", use_container_width=True):
+                admin_manual_edit_dialog()
+        elif is_global:
+            if st.button("👤 Editar Usuario (Registro Manual)", use_container_width=True):
+                admin_manual_edit_dialog()
 
         if not admin_districts and not is_global:
 
