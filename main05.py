@@ -650,9 +650,36 @@ dialog_decorator = getattr(st, "dialog", getattr(st, "experimental_dialog", None
 success_dialog = dialog_decorator("Registro")(base_success_dialog) if dialog_decorator else base_success_dialog
 error_dialog = dialog_decorator("Revisión Necesaria")(base_error_dialog) if dialog_decorator else base_error_dialog
 
+@st.dialog("Registro Manual de Usuario 2026")
 def admin_nuevo_usuario_dialog():
-    st.markdown("### Registro Manual de Usuario 2026")
     cedula = st.text_input("Cédula / Pasaporte", placeholder="V-12345678").strip()
+    if not cedula:
+        st.info("Ingrese una cédula para validar.")
+        return
+    
+    # Validar si ya existe en 2026
+    res26 = busca_en_turso_pronda26(cedula)
+    if isinstance(res26, pd.DataFrame) and not res26.empty:
+        st.error(f"⚠️ El usuario con la cédula **{cedula}** ya está registrado en el Padrón 2026.")
+        user_ex = res26.iloc[0]
+        st.markdown(f"**Nombre Actual:** {user_ex.get('NOMBRES')} {user_ex.get('APELLIDOS')}")
+        st.markdown(f"**Status:** {user_ex.get('Status')}")
+        if st.button("Cerrar", use_container_width=True):
+            st.rerun()
+        return
+    
+    # Validar si ya existe en 2025
+    res25 = busca_en_turso_pronda25(cedula)
+    if res25:
+        st.warning(f"⚠️ El usuario con la cédula **{cedula}** ya existe en el Padrón 2025.")
+        st.info("Este usuario debe realizar su proceso a través del formulario de **Consulta y Registro** en la página de inicio.")
+        st.markdown(f"**Nombre en Padrón 2025:** {res25.get('NOMBRES')} {res25.get('APELLIDOS')}")
+        if st.button("Cerrar", use_container_width=True):
+            st.rerun()
+        return
+
+    # Si no existe en ninguno, permitir el registro
+    st.success(f"✅ Cédula {cedula} disponible para un registro absolutamente nuevo.")
     
     col1, col2 = st.columns(2)
     nombres = col1.text_input("Nombres")
@@ -667,11 +694,12 @@ def admin_nuevo_usuario_dialog():
     
     st.info("Nota: El administrador solo registra los datos básicos. El usuario deberá ingresar al portal de consulta y registro para completar su pago.")
 
-    if st.button("Acordin de Guardar", type="primary", use_container_width=True):
-        if not cedula or not nombres or not apellidos:
-            st.error("Cédula, Nombres y Apellidos son obligatorios.")
+    if st.button("💾 Guardar Nuevo Usuario", type="primary", use_container_width=True):
+        if not nombres or not apellidos:
+            st.error("Nombres y Apellidos son obligatorios.")
         else:
             with st.spinner("Registrando..."):
+                now_str = datetime.now().isoformat()
                 values_dict = {
                     "CEDULA": cedula, "NOMBRES": nombres, "APELLIDOS": apellidos,
                     "CATEGORIA": categoria, "DISTRITO": distrito, "EMAIL": email, "TELEFONOS": telefonos,
@@ -679,12 +707,14 @@ def admin_nuevo_usuario_dialog():
                     "MONTO_PAGO": 0.0, "REFERENCIA": "-", "ARCHIVO_PAGO": "", 
                     "CURSO_INSCRITO": "-", "MONTO_A_PAGAR": 0.0, "MODALIDAD": "-",
                     "BancoE": "-", "ObservaciónPE": "Pre-registro Admin", "pagoEn": "-",
-                    "FECHA_REGISTRO": datetime.now().isoformat(), "Status": "No Inscrito"
+                    "FECHA_REGISTRO": now_str, "Status": "No Inscrito"
                 }
                 try:
                     run_async(_insert_registro(values_dict))
-                    st.success(f"Usuario {nombres} {apellidos} registrado exitosamente como pre-registro.")
+                    st.success(f"¡Usuario {nombres} {apellidos} registrado exitosamente!")
                     st.balloons()
+                    import time
+                    time.sleep(2)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al guardar: {e}")
@@ -1291,11 +1321,19 @@ elif st.session_state.page == "Registro":
         read_only = has_payment
         
         if read_only:
-            sac.result(
-                label='Ya inscrito en espera de revision de pago de la administración.',
-                description=f"Status={defaults.get('Status', 'Pendiente')}",
-                status='warning'
-            )
+            curr_status = defaults.get('Status', 'Pendiente')
+            if curr_status == 'Verificado':
+                sac.result(
+                    label='Excelente, su Inscripción y pago han sido Verificado',
+                    description=f"Status={curr_status}",
+                    status='success'
+                )
+            else:
+                sac.result(
+                    label='Ya inscrito en espera de revision de pago de la administración.',
+                    description=f"Status={curr_status}",
+                    status='warning'
+                )
         elif user_source == "2026":
             st.info("Usted ha sido pre-registrado por el administrador. Por favor complete sus detalles de pago para finalizar su inscripción.")
 
