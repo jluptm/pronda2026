@@ -1501,7 +1501,7 @@ elif st.session_state.page == "Registro":
             if errores:
                 error_dialog(errores)
             elif user_source == "2026":
-                st.warning("Usted ya está registrado en el Padrón 2026. Los cambios no se han sobrescrito en este entorno Demo.")
+                st.warning("Usted ya está registrado en el Padrón 2026. Los cambios no se han sobrescrito en este entorno.")
             else:
                 with st.spinner("Subiendo datos y captura a Turso y R2..."):
                     img_path = ""
