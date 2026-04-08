@@ -762,13 +762,23 @@ def admin_manual_edit_dialog():
             nombres = st.text_input("Nombres", value=str(user_data.get('NOMBRES', '')))
             apellidos = st.text_input("Apellidos", value=str(user_data.get('APELLIDOS', '')))
             
-            curr_cat = user_data.get('CATEGORIA', '')
-            cat_idx = CATEGORIAS.index(curr_cat) if curr_cat in CATEGORIAS else 0
-            categoria = st.selectbox("Categoría", CATEGORIAS, index=cat_idx)
+            curr_cat = str(user_data.get('CATEGORIA', '')).strip()
+            if curr_cat in ["", "-", "nan", "None"]:
+                cat_list = ["-"] + CATEGORIAS
+                cat_idx = 0
+            else:
+                cat_list = CATEGORIAS
+                cat_idx = CATEGORIAS.index(curr_cat) if curr_cat in CATEGORIAS else 0
+            categoria = st.selectbox("Categoría", cat_list, index=cat_idx)
             
-            curr_dist = user_data.get('DISTRITO', '')
-            dist_idx = DISTRITOS.index(curr_dist) if curr_dist in DISTRITOS else 0
-            distrito = st.selectbox("Distrito", DISTRITOS, index=dist_idx)
+            curr_dist = str(user_data.get('DISTRITO', '')).strip()
+            if curr_dist in ["", "-", "nan", "None"]:
+                dist_list = ["-"] + DISTRITOS
+                dist_idx = 0
+            else:
+                dist_list = DISTRITOS
+                dist_idx = DISTRITOS.index(curr_dist) if curr_dist in DISTRITOS else 0
+            distrito = st.selectbox("Distrito", dist_list, index=dist_idx)
             
             email = st.text_input("Email", value=str(user_data.get('EMAIL', '')))
             telefonos = st.text_input("Teléfonos", value=str(user_data.get('TELEFONOS', '')))
@@ -1231,9 +1241,14 @@ elif st.session_state.page == "Admin":
                                     e_nombres = st.text_input("Nombres", value=str(user_to_edit.get('NOMBRES', '')))
                                     e_apellidos = st.text_input("Apellidos", value=str(user_to_edit.get('APELLIDOS', '')))
                                     
-                                    cat_val = user_to_edit.get('CATEGORIA', '')
-                                    cat_idx = CATEGORIAS.index(cat_val) if cat_val in CATEGORIAS else 0
-                                    e_categoria = st.selectbox("Categoría", CATEGORIAS, index=cat_idx)
+                                    cat_val = str(user_to_edit.get('CATEGORIA', '')).strip()
+                                    if cat_val in ["", "-", "nan", "None"]:
+                                        e_cat_list = ["-"] + CATEGORIAS
+                                        e_cat_idx = 0
+                                    else:
+                                        e_cat_list = CATEGORIAS
+                                        e_cat_idx = CATEGORIAS.index(cat_val) if cat_val in CATEGORIAS else 0
+                                    e_categoria = st.selectbox("Categoría", e_cat_list, index=e_cat_idx)
                                     
                                     e_email = st.text_input("Correos", value=str(user_to_edit.get('EMAIL', '')))
                                     e_telefonos = st.text_input("Teléfonos", value=str(user_to_edit.get('TELEFONOS', '')))
