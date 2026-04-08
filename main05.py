@@ -791,18 +791,27 @@ def admin_manual_edit_dialog():
             if is_verified:
                 st.info("✅ El pago ya ha sido asignado y verificado. Campos de pago bloqueados.")
             
-            modalidad = st.selectbox("Modalidad", ["Presencial", "Virtual"], 
-                                     index=0 if user_data.get('MODALIDAD') == "Presencial" else 1, 
-                                     disabled=is_verified)
+            curr_mod = str(user_data.get('MODALIDAD', '')).strip()
+            if curr_mod in ["", "-", "nan", "None"]:
+                mod_list = ["-", "Presencial", "Virtual"]
+                mod_idx = 0
+            else:
+                mod_list = ["Presencial", "Virtual"]
+                mod_idx = 0 if curr_mod == "Presencial" else 1
+            modalidad = st.selectbox("Modalidad", mod_list, index=mod_idx, disabled=is_verified)
             
             monto_a_pagar = st.number_input("Monto a Pagar", value=float(user_data.get('MONTO_A_PAGAR', 0.0)), 
                                             disabled=is_verified)
             
             formas = ["Transferencia", "Pago Móvil", "Efectivo", "Otro"]
-            curr_forma = user_data.get('FORMA_PAGO', 'Transferencia')
-            forma_pago = st.selectbox("Forma de Pago", formas, 
-                                      index=formas.index(curr_forma) if curr_forma in (formas) else 0,
-                                      disabled=is_verified)
+            curr_forma = str(user_data.get('FORMA_PAGO', '')).strip()
+            if curr_forma in ["", "-", "nan", "None"]:
+                form_list = ["-"] + formas
+                form_idx = 0
+            else:
+                form_list = formas
+                form_idx = formas.index(curr_forma) if curr_forma in formas else 0
+            forma_pago = st.selectbox("Forma de Pago", form_list, index=form_idx, disabled=is_verified)
             
             fecha_pago = st.text_input("Fecha de Pago", value=str(user_data.get('FECHA_PAGO', '-')), 
                                       disabled=is_verified)
@@ -814,10 +823,14 @@ def admin_manual_edit_dialog():
                                       disabled=is_verified)
             
             # Banco Emisor
-            curr_banco = user_data.get('BancoE', '-')
-            b_idx = 0
-            if curr_banco in BANCOS_OPCIONES: b_idx = BANCOS_OPCIONES.index(curr_banco)
-            banco = st.selectbox("Banco Emisor", BANCOS_OPCIONES, index=b_idx, disabled=is_verified)
+            curr_banco = str(user_data.get('BancoE', '')).strip()
+            if curr_banco in ["", "-", "nan", "None"]:
+                banco_list = ["-"] + BANCOS_OPCIONES
+                b_idx = 0
+            else:
+                banco_list = BANCOS_OPCIONES
+                b_idx = BANCOS_OPCIONES.index(curr_banco) if curr_banco in BANCOS_OPCIONES else 0
+            banco = st.selectbox("Banco Emisor", banco_list, index=b_idx, disabled=is_verified)
             
             pagado_en = st.text_input("Pagado En", value=str(user_data.get('pagoEn', '-')), 
                                      disabled=is_verified)
