@@ -941,6 +941,17 @@ elif st.session_state.page == "Admin":
         except:
             admin_districts = [i.strip() for i in tipo_acceso[1:-1].split(",")] if tipo_acceso.startswith("[") else []
             
+        limited_districts = []
+        parsed_districts = []
+        for d in admin_districts:
+            if d.endswith("-L"):
+                raw_d = d[:-2].strip()
+                limited_districts.append(raw_d)
+                parsed_districts.append(raw_d)
+            else:
+                parsed_districts.append(d)
+        admin_districts = parsed_districts
+        
         st.markdown(f"## Tablero de Administración - {ctx.get('Nombres')}")
         st.write(f"Rol/Distritos: **{tipo_acceso}**")
         
@@ -1218,9 +1229,14 @@ elif st.session_state.page == "Admin":
 
                 # LISTADO POR DISTRITO
                 for dist in distritos_a_listar:
+                    is_limited = dist in limited_districts
                     dist_df = df_full[df_full['distrito_final'] == dist]
                     with st.expander(f"Distrito: {dist} ({len(dist_df)} Registros)", expanded=not is_global):
-                        tab1, tab2, tab3 = st.tabs(["Estadísticas", "Tabla de Datos", "👤 Editar Usuario"])
+                        if is_limited:
+                            tab1, tab2 = st.tabs(["Estadísticas", "Tabla de Datos"])
+                        else:
+                            tab1, tab2, tab3 = st.tabs(["Estadísticas", "Tabla de Datos", "👤 Editar Usuario"])
+                            
                         with tab1:
                             col_a, col_b, col_c = st.columns(3)
                             
@@ -1235,47 +1251,51 @@ elif st.session_state.page == "Admin":
                             render_admin_charts(dist_df)
                             
                         with tab2:
-                            df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
+                            if is_limited:
+                                df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'inscrito', 'Status']]
+                            else:
+                                df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
                             st.dataframe(style_user_table(df_table_dist.style), use_container_width=True)
 
-                        with tab3:
-                            st.write(f"### ✏️ Editar Usuario de Distrito: {dist}")
-                            user_list = [f"{r['NOMBRES']} {r['APELLIDOS']} ({r['CEDULA']})" for _, r in dist_df.iterrows()]
-                            selected_label = st.selectbox("Seleccione el usuario a editar:", options=user_list, key=f"edit_sel_{dist}")
-                            
-                            if selected_label:
-                                ced_to_edit = selected_label.split("(")[-1].strip(")")
-                                user_to_edit = dist_df[dist_df['CEDULA'] == ced_to_edit].iloc[0]
+                        if not is_limited:
+                            with tab3:
+                                st.write(f"### ✏️ Editar Usuario de Distrito: {dist}")
+                                user_list = [f"{r['NOMBRES']} {r['APELLIDOS']} ({r['CEDULA']})" for _, r in dist_df.iterrows()]
+                                selected_label = st.selectbox("Seleccione el usuario a editar:", options=user_list, key=f"edit_sel_{dist}")
                                 
-                                # Formulario sin usar st.form para permitir inputs dinámicos si se requiere, 
-                                # pero st.form es mejor para botones de guardado aislados
-                                with st.form(key=f"form_edit_{ced_to_edit}_{dist}"):
-                                    st.write(f"Editando Cédula: **{ced_to_edit}**")
-                                    e_nombres = st.text_input("Nombres", value=str(user_to_edit.get('NOMBRES', '')))
-                                    e_apellidos = st.text_input("Apellidos", value=str(user_to_edit.get('APELLIDOS', '')))
+                                if selected_label:
+                                    ced_to_edit = selected_label.split("(")[-1].strip(")")
+                                    user_to_edit = dist_df[dist_df['CEDULA'] == ced_to_edit].iloc[0]
                                     
-                                    cat_val = str(user_to_edit.get('CATEGORIA', '')).strip()
-                                    if cat_val in ["", "-", "nan", "None"]:
-                                        e_cat_list = ["-"] + CATEGORIAS
-                                        e_cat_idx = 0
-                                    else:
-                                        e_cat_list = CATEGORIAS
-                                        e_cat_idx = CATEGORIAS.index(cat_val) if cat_val in CATEGORIAS else 0
-                                    e_categoria = st.selectbox("Categoría", e_cat_list, index=e_cat_idx)
-                                    
-                                    e_email = st.text_input("Correos", value=str(user_to_edit.get('EMAIL', '')))
-                                    e_telefonos = st.text_input("Teléfonos", value=str(user_to_edit.get('TELEFONOS', '')))
-                                    
-                                    st.info(f"Distrito fijo: {dist}")
-                                    
-                                    submit_edit = st.form_submit_button("Guardar Cambios", type="primary", use_container_width=True)
-                                    
-                                    if submit_edit:
-                                        with st.spinner("Guardando..."):
-                                            res_msg = upsert_user_info(ced_to_edit, e_nombres, e_apellidos, e_categoria, e_email, e_telefonos, dist)
-                                            st.success(f"Usuario {e_nombres} {e_apellidos} {res_msg} correctamente.")
-                                            st.balloons()
-                                            # st.rerun() # Opcional, dependiendo de si queremos refrescar todo el panel
+                                    # Formulario sin usar st.form para permitir inputs dinámicos si se requiere, 
+                                    # pero st.form es mejor para botones de guardado aislados
+                                    with st.form(key=f"form_edit_{ced_to_edit}_{dist}"):
+                                        st.write(f"Editando Cédula: **{ced_to_edit}**")
+                                        e_nombres = st.text_input("Nombres", value=str(user_to_edit.get('NOMBRES', '')))
+                                        e_apellidos = st.text_input("Apellidos", value=str(user_to_edit.get('APELLIDOS', '')))
+                                        
+                                        cat_val = str(user_to_edit.get('CATEGORIA', '')).strip()
+                                        if cat_val in ["", "-", "nan", "None"]:
+                                            e_cat_list = ["-"] + CATEGORIAS
+                                            e_cat_idx = 0
+                                        else:
+                                            e_cat_list = CATEGORIAS
+                                            e_cat_idx = CATEGORIAS.index(cat_val) if cat_val in CATEGORIAS else 0
+                                        e_categoria = st.selectbox("Categoría", e_cat_list, index=e_cat_idx)
+                                        
+                                        e_email = st.text_input("Correos", value=str(user_to_edit.get('EMAIL', '')))
+                                        e_telefonos = st.text_input("Teléfonos", value=str(user_to_edit.get('TELEFONOS', '')))
+                                        
+                                        st.info(f"Distrito fijo: {dist}")
+                                        
+                                        submit_edit = st.form_submit_button("Guardar Cambios", type="primary", use_container_width=True)
+                                        
+                                        if submit_edit:
+                                            with st.spinner("Guardando..."):
+                                                res_msg = upsert_user_info(ced_to_edit, e_nombres, e_apellidos, e_categoria, e_email, e_telefonos, dist)
+                                                st.success(f"Usuario {e_nombres} {e_apellidos} {res_msg} correctamente.")
+                                                st.balloons()
+                                                # st.rerun() # Opcional, dependiendo de si queremos refrescar todo el panel
 
 # 4. REGISTRO Y CONSULTA
 elif st.session_state.page == "Registro":
