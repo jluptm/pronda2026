@@ -655,7 +655,7 @@ success_dialog = dialog_decorator("Registro")(base_success_dialog) if dialog_dec
 error_dialog = dialog_decorator("Revisión Necesaria")(base_error_dialog) if dialog_decorator else base_error_dialog
 
 @st.dialog("Registro Manual de Usuario 2026")
-def admin_nuevo_usuario_dialog():
+def admin_nuevo_usuario_dialog(allowed_districts=None):
     cedula = st.text_input("Cédula / Pasaporte", placeholder="V-12345678").strip()
     if not cedula:
         st.info("Ingrese una cédula para validar.")
@@ -701,7 +701,10 @@ def admin_nuevo_usuario_dialog():
     else:
         categoria = categoria_sel
         
-    distrito = col4.selectbox("Distrito", st.session_state.DISTRITOS_LIST, index=0)
+        
+    # Filtrar distritos si hay restricción
+    final_dist_list = [d for d in st.session_state.DISTRITOS_LIST if allowed_districts is None or d in allowed_districts]
+    distrito = col4.selectbox("Distrito", final_dist_list, index=0)
     
     email = st.text_input("Correo Electrónico")
     telefonos = st.text_input("Teléfonos")
@@ -739,7 +742,7 @@ def admin_nuevo_usuario_dialog():
 
 
 @st.dialog("Edición Administrativa de Usuario")
-def admin_manual_edit_dialog():
+def admin_manual_edit_dialog(allowed_districts=None):
     cedula = st.text_input("Ingrese la Cédula (ID) del usuario:", placeholder="Ej. 12345678").strip()
     if not cedula:
         st.info("Por favor, ingrese una cédula para comenzar.")
@@ -768,6 +771,14 @@ def admin_manual_edit_dialog():
         is_new = True
     else:
         st.error("Cédula no encontrada en 2025 ni 2026.")
+        return
+        
+    # Verificar permisos de distrito
+    u_dist_check = str(user_data.get('DISTRITO', '')).strip()
+    if allowed_districts is not None and u_dist_check not in allowed_districts:
+        st.error(f"Acceso Denegado: No tienes permisos para editar registros del distrito **{u_dist_check}**.")
+        if st.button("Cerrar", use_container_width=True, key="admin_edit_denied_close"):
+            st.rerun()
         return
         
     st.write(f"### Edición Manual: {user_data.get('NOMBRES')} {user_data.get('APELLIDOS')}")
@@ -974,27 +985,37 @@ elif st.session_state.page == "Admin":
             admin_districts = [i.strip() for i in tipo_acceso[1:-1].split(",")] if tipo_acceso.startswith("[") else []
             
         limited_districts = []
+        total_privilege_districts = []
         parsed_districts = []
         for d in admin_districts:
             if d.endswith("-L"):
                 raw_d = d[:-2].strip()
                 limited_districts.append(raw_d)
                 parsed_districts.append(raw_d)
+            elif d.endswith("-T"):
+                raw_d = d[:-2].strip()
+                total_privilege_districts.append(raw_d)
+                parsed_districts.append(raw_d)
             else:
                 parsed_districts.append(d)
         admin_districts = parsed_districts
+        has_t_access = len(total_privilege_districts) > 0
         
         st.markdown(f"## Tablero de Administración - {ctx.get('Nombres')}")
         st.write(f"Rol/Distritos: **{tipo_acceso}**")
         
         is_global = tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]
         
-        if is_global and tipo_acceso.strip(" []").lower() != "financiero":
+        # Botones de Acción (Global o con acceso Total -T)
+        if (is_global or has_t_access) and tipo_acceso.strip(" []").lower() != "financiero":
             c_adm1, c_adm2 = st.columns(2)
+            # Pasamos los distritos permitidos si no es global
+            allowed = total_privilege_districts if not is_global else None
+            
             if c_adm1.button("➕ Nuevo Usuario (Padrón 2026)", use_container_width=True):
-                admin_nuevo_usuario_dialog()
+                admin_nuevo_usuario_dialog(allowed_districts=allowed)
             if c_adm2.button("👤 Editar Usuario (Registro Manual)", use_container_width=True):
-                admin_manual_edit_dialog()
+                admin_manual_edit_dialog(allowed_districts=allowed)
         elif is_global:
             if st.button("👤 Editar Usuario (Registro Manual)", use_container_width=True):
                 admin_manual_edit_dialog()
@@ -1009,8 +1030,10 @@ elif st.session_state.page == "Admin":
             if df_full.empty:
                 st.write("No hay registros en Turso para tus distritos.")
             else:
+                if is_global or has_t_access:
+                    st.info(f"Panel {tipo_acceso} cargado. Acceso {'Global' if is_global else 'Especial (T)'}.")
+                
                 if is_global:
-                    st.info(f"Panel {tipo_acceso} cargado. Acceso Global.")
                     # SECCIÓN COMBINADA AL PRINCIPIO
                     with st.expander("📊 COMBINADO (Todos los Distritos)", expanded=True):
                         tab1, tab2, tab3 = st.tabs(["Estadísticas Globales", "Tabla Completa", "🏦 Movimientos DataBank"])
@@ -1262,9 +1285,10 @@ elif st.session_state.page == "Admin":
                 # LISTADO POR DISTRITO
                 for dist in distritos_a_listar:
                     is_limited = dist in limited_districts
+                    is_total_dist = dist in total_privilege_districts
                     dist_df = df_full[df_full['distrito_final'] == dist]
                     with st.expander(f"Distrito: {dist} ({len(dist_df)} Registros)", expanded=not is_global):
-                        if is_limited:
+                        if is_limited or is_total_dist:
                             tab1, tab2 = st.tabs(["Estadísticas", "Tabla de Datos"])
                         else:
                             tab1, tab2, tab3 = st.tabs(["Estadísticas", "Tabla de Datos", "👤 Editar Usuario"])
@@ -1289,7 +1313,7 @@ elif st.session_state.page == "Admin":
                                 df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
                             st.dataframe(style_user_table(df_table_dist.style), use_container_width=True)
 
-                        if not is_limited:
+                        if not is_limited and not is_total_dist:
                             with tab3:
                                 st.write(f"### ✏️ Editar Usuario de Distrito: {dist}")
                                 user_list = [f"{r['NOMBRES']} {r['APELLIDOS']} ({r['CEDULA']})" for _, r in dist_df.iterrows()]
