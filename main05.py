@@ -48,9 +48,9 @@ R2_ENDPOINT_URL = get_secret("aws", "endpoint_url", "R2_ENDPOINT_URL")
 R2_PUBLIC_URL = get_secret("aws", "public_url", "R2_PUBLIC_URL")
 R2_BUCKET_NAME = get_secret("aws", "bucket_name", "R2_BUCKET_NAME") or "prondamin-captures"
 
-# Listas
-CATEGORIAS = ["Ministro Ordenado", "Ministro Licenciado", "Ministro Cristiano", "Ministro Distrital"]
-DISTRITOS = ["Andino", "Centro",  "Centro Llanos", "Falcón", "Lara", "Llanos Occidentales",  "Metropolitano", "Nor Oriente", "Sur Oriente",  "Yaracuy", "Zulia" ]
+# Listas Base
+CATEGORIAS_BASE = ["Ministro Ordenado", "Ministro Licenciado", "Ministro Cristiano", "Ministro Distrital"]
+DISTRITOS_BASE = ["Andino", "Centro",  "Centro Llanos", "Falcón", "Lara", "Llanos Occidentales",  "Metropolitano", "Nor Oriente", "Sur Oriente",  "Yaracuy", "Zulia" ]
 BANCOS_OPCIONES = [
     "0001-Banco Central de Venezuela",
     "0102-Banco de Venezuela (BDV)",
@@ -623,6 +623,10 @@ def dropbox_to_raw(url: str) -> str:
 # -------------------------------------------------------------------
 if "page" not in st.session_state: st.session_state.page = "Inicio"
 if "user_ctx" not in st.session_state: st.session_state.user_ctx = None
+if "CATEGORIAS_LIST" not in st.session_state:
+    st.session_state.CATEGORIAS_LIST = ["-"] + CATEGORIAS_BASE
+if "DISTRITOS_LIST" not in st.session_state:
+    st.session_state.DISTRITOS_LIST = ["-"] + DISTRITOS_BASE
 
 def navigate_to(page_name):
     st.session_state.page = page_name
@@ -686,8 +690,18 @@ def admin_nuevo_usuario_dialog():
     apellidos = col2.text_input("Apellidos")
     
     col3, col4 = st.columns(2)
-    categoria = col3.selectbox("Categoría", CATEGORIAS, index=0)
-    distrito = col4.selectbox("Distrito", DISTRITOS, index=0)
+    
+    # Lógica para nueva categoría
+    cat_options = st.session_state.CATEGORIAS_LIST + ["➕ Nueva Categoría..."]
+    categoria_sel = col3.selectbox("Categoría", cat_options, index=0)
+    
+    if categoria_sel == "➕ Nueva Categoría...":
+        nueva_cat = col3.text_input("Nombre de la Nueva Categoría")
+        categoria = nueva_cat.strip()
+    else:
+        categoria = categoria_sel
+        
+    distrito = col4.selectbox("Distrito", st.session_state.DISTRITOS_LIST, index=0)
     
     email = st.text_input("Correo Electrónico")
     telefonos = st.text_input("Teléfonos")
@@ -700,6 +714,10 @@ def admin_nuevo_usuario_dialog():
         else:
             with st.spinner("Registrando..."):
                 now_str = datetime.now().isoformat()
+                # Si se agregó una nueva categoría y no está en la lista, añadirla permanentemente
+                if categoria and categoria not in st.session_state.CATEGORIAS_LIST:
+                    st.session_state.CATEGORIAS_LIST.append(categoria)
+                
                 values_dict = {
                     "CEDULA": cedula, "NOMBRES": nombres, "APELLIDOS": apellidos,
                     "CATEGORIA": categoria, "DISTRITO": distrito, "EMAIL": email, "TELEFONOS": telefonos,
@@ -763,22 +781,30 @@ def admin_manual_edit_dialog():
             apellidos = st.text_input("Apellidos", value=str(user_data.get('APELLIDOS', '')))
             
             curr_cat = str(user_data.get('CATEGORIA', '')).strip()
-            if curr_cat in ["", "-", "nan", "None"]:
-                cat_list = ["-"] + CATEGORIAS
-                cat_idx = 0
+            if curr_cat in ["", "nan", "None"]: curr_cat = "-"
+            
+            # Asegurar que el actual esté en la lista
+            if curr_cat not in st.session_state.CATEGORIAS_LIST:
+                st.session_state.CATEGORIAS_LIST.append(curr_cat)
+            
+            cat_options = st.session_state.CATEGORIAS_LIST + ["➕ Nueva Categoría..."]
+            cat_idx = st.session_state.CATEGORIAS_LIST.index(curr_cat)
+            categoria_sel = st.selectbox("Categoría", cat_options, index=cat_idx)
+            
+            if categoria_sel == "➕ Nueva Categoría...":
+                nueva_cat = st.text_input("Nombre de la Nueva Categoría")
+                categoria = nueva_cat.strip()
             else:
-                cat_list = CATEGORIAS
-                cat_idx = CATEGORIAS.index(curr_cat) if curr_cat in CATEGORIAS else 0
-            categoria = st.selectbox("Categoría", cat_list, index=cat_idx)
+                categoria = categoria_sel
             
             curr_dist = str(user_data.get('DISTRITO', '')).strip()
-            if curr_dist in ["", "-", "nan", "None"]:
-                dist_list = ["-"] + DISTRITOS
-                dist_idx = 0
-            else:
-                dist_list = DISTRITOS
-                dist_idx = DISTRITOS.index(curr_dist) if curr_dist in DISTRITOS else 0
-            distrito = st.selectbox("Distrito", dist_list, index=dist_idx)
+            if curr_dist in ["", "nan", "None"]: curr_dist = "-"
+            
+            if curr_dist not in st.session_state.DISTRITOS_LIST:
+                st.session_state.DISTRITOS_LIST.append(curr_dist)
+            
+            dist_idx = st.session_state.DISTRITOS_LIST.index(curr_dist)
+            distrito = st.selectbox("Distrito", st.session_state.DISTRITOS_LIST, index=dist_idx)
             
             email = st.text_input("Email", value=str(user_data.get('EMAIL', '')))
             telefonos = st.text_input("Teléfonos", value=str(user_data.get('TELEFONOS', '')))
@@ -840,6 +866,12 @@ def admin_manual_edit_dialog():
 
         if st.form_submit_button("💾 Guardar Cambios en Registro", type="primary", use_container_width=True):
             # Guardar Todo
+            # Actualizar listas si hay algo nuevo
+            if categoria and categoria != "➕ Nueva Categoría..." and categoria not in st.session_state.CATEGORIAS_LIST:
+                st.session_state.CATEGORIAS_LIST.append(categoria)
+            if distrito and distrito not in st.session_state.DISTRITOS_LIST:
+                st.session_state.DISTRITOS_LIST.append(distrito)
+
             all_fields = {
                 "CEDULA": cedula, "NOMBRES": nombres, "APELLIDOS": apellidos, "CATEGORIA": categoria,
                 "DISTRITO": distrito, "EMAIL": email, "TELEFONOS": telefonos,
@@ -971,7 +1003,7 @@ elif st.session_state.page == "Admin":
 
             st.warning(f"No hay registros visibles para tu rol.")
         else:
-            distritos_a_listar = DISTRITOS if is_global else admin_districts
+            distritos_a_listar = st.session_state.DISTRITOS_LIST if is_global else admin_districts
             df_full = load_merged_data(distritos_a_listar)
             
             if df_full.empty:
@@ -1001,7 +1033,7 @@ elif st.session_state.page == "Admin":
                                 df_2026_raw = run_async(_get_df_from_turso("prondamin2026BB"))
                                 total_db_2026 = len(df_2026_raw)
                                 # Registros que no coinciden con la lista oficial de DISTRITOS
-                                df_errores = df_2026_raw[~df_2026_raw['DISTRITO'].isin(DISTRITOS)]
+                                df_errores = df_2026_raw[~df_2026_raw['DISTRITO'].isin(st.session_state.DISTRITOS_LIST)]
                                 count_errores = len(df_errores)
                                 
                                 col_q1, col_q2 = st.columns(2)
@@ -1275,13 +1307,20 @@ elif st.session_state.page == "Admin":
                                         e_apellidos = st.text_input("Apellidos", value=str(user_to_edit.get('APELLIDOS', '')))
                                         
                                         cat_val = str(user_to_edit.get('CATEGORIA', '')).strip()
-                                        if cat_val in ["", "-", "nan", "None"]:
-                                            e_cat_list = ["-"] + CATEGORIAS
-                                            e_cat_idx = 0
+                                        if cat_val in ["", "nan", "None"]: cat_val = "-"
+                                        
+                                        if cat_val not in st.session_state.CATEGORIAS_LIST:
+                                            st.session_state.CATEGORIAS_LIST.append(cat_val)
+                                            
+                                        e_cat_options = st.session_state.CATEGORIAS_LIST + ["➕ Nueva Categoría..."]
+                                        e_cat_idx = st.session_state.CATEGORIAS_LIST.index(cat_val)
+                                        e_cat_sel = st.selectbox("Categoría", e_cat_options, index=e_cat_idx)
+                                        
+                                        if e_cat_sel == "➕ Nueva Categoría...":
+                                            e_nueva_cat = st.text_input("Nombre de la Nueva Categoría", key=f"new_cat_{ced_to_edit}")
+                                            e_categoria = e_nueva_cat.strip()
                                         else:
-                                            e_cat_list = CATEGORIAS
-                                            e_cat_idx = CATEGORIAS.index(cat_val) if cat_val in CATEGORIAS else 0
-                                        e_categoria = st.selectbox("Categoría", e_cat_list, index=e_cat_idx)
+                                            e_categoria = e_cat_sel
                                         
                                         e_email = st.text_input("Correos", value=str(user_to_edit.get('EMAIL', '')))
                                         e_telefonos = st.text_input("Teléfonos", value=str(user_to_edit.get('TELEFONOS', '')))
@@ -1291,7 +1330,10 @@ elif st.session_state.page == "Admin":
                                         submit_edit = st.form_submit_button("Guardar Cambios", type="primary", use_container_width=True)
                                         
                                         if submit_edit:
-                                            with st.spinner("Guardando..."):
+                                                # Actualizar lista de categorías si es nueva
+                                                if e_categoria and e_categoria != "➕ Nueva Categoría..." and e_categoria not in st.session_state.CATEGORIAS_LIST:
+                                                    st.session_state.CATEGORIAS_LIST.append(e_categoria)
+                                                
                                                 res_msg = upsert_user_info(ced_to_edit, e_nombres, e_apellidos, e_categoria, e_email, e_telefonos, dist)
                                                 st.success(f"Usuario {e_nombres} {e_apellidos} {res_msg} correctamente.")
                                                 st.balloons()
@@ -1398,11 +1440,24 @@ elif st.session_state.page == "Registro":
         apellidos = c2.text_input("Apellidos", value=defaults.get('APELLIDOS'), disabled=read_only)
         
         c3, c4 = st.columns(2)
-        cat_idx = CATEGORIAS.index(defaults.get("CATEGORIA")) if defaults.get("CATEGORIA") in CATEGORIAS else 0
-        dist_idx = DISTRITOS.index(defaults.get("DISTRITO")) if defaults.get("DISTRITO") in DISTRITOS else 0
         
-        categoria = c3.selectbox("Categoría", CATEGORIAS, index=cat_idx, disabled=True)
-        distrito = c4.selectbox("Distrito", DISTRITOS, index=dist_idx, disabled=True)
+        # Normalizar Categoría para Registro
+        val_cat = str(defaults.get("CATEGORIA", "")).strip()
+        if val_cat in ["", "nan", "None"]: val_cat = "-"
+        if val_cat not in st.session_state.CATEGORIAS_LIST:
+            st.session_state.CATEGORIAS_LIST.append(val_cat)
+        
+        cat_idx = st.session_state.CATEGORIAS_LIST.index(val_cat)
+        categoria = c3.selectbox("Categoría", st.session_state.CATEGORIAS_LIST, index=cat_idx, disabled=True)
+        
+        # Normalizar Distrito para Registro
+        val_dist = str(defaults.get("DISTRITO", "")).strip()
+        if val_dist in ["", "nan", "None"]: val_dist = "-"
+        if val_dist not in st.session_state.DISTRITOS_LIST:
+            st.session_state.DISTRITOS_LIST.append(val_dist)
+            
+        dist_idx = st.session_state.DISTRITOS_LIST.index(val_dist)
+        distrito = c4.selectbox("Distrito", st.session_state.DISTRITOS_LIST, index=dist_idx, disabled=True)
         
         
         emails = st.text_input("Correos Electrónicos", value=defaults.get('EMAIL'), disabled=read_only)
