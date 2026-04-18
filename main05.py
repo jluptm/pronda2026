@@ -929,28 +929,45 @@ if st.session_state.page != "Inicio":
 
 # 1. INIT PAGE
 if st.session_state.page == "Inicio":
-    st.markdown("### Bienvenidos al Sistema de Gestión Ministerial Prondamin 2026")
+    #st.markdown("### Bienvenidos al Sistema de Gestión Ministerial Prondamin 2026")
     #st.info("Seleccione una opción a continuación para continuar:")
     st.image(os.path.join("assets", "enMantenimiento.png"), use_container_width=True)
-    st.stop()
-    col_nav1, col_nav2 = st.columns(2)
-    with col_nav1:
-        if st.button("📋 Consulta y Registro", use_container_width=True, type="primary"):
-            navigate_to("Registro")
+    #st.stop()
+#===========================================================================
+    if st.session_state.user_ctx is None:
+        if st.button("🔒 Admin Login", use_container_width=True):
+            navigate_to("Login")
             st.rerun()
-    with col_nav2:
-        if st.session_state.user_ctx is None:
-            if st.button("🔒 Admin Login", use_container_width=True):
-                navigate_to("Login")
-                st.rerun()
-        else:
-            if st.button("📊 Dashboard Admin", use_container_width=True):
-                navigate_to("Admin")
-                st.rerun()
-            if st.button("🚪 Cerrar Sesión", use_container_width=True):
-                st.session_state.user_ctx = None
-                navigate_to("Inicio")
-                st.rerun()
+    else:
+        if st.button("📊 Dashboard Admin", use_container_width=True):
+            navigate_to("Admin")
+            st.rerun()
+        if st.button("🚪 Cerrar Sesión", use_container_width=True):
+            st.session_state.user_ctx = None
+            navigate_to("Inicio")
+            st.rerun()
+    
+
+#===========================================================================
+
+    # col_nav1, col_nav2 = st.columns(2)
+    # with col_nav1:
+    #     if st.button("📋 Consulta y Registro", use_container_width=True, type="primary"):
+    #         navigate_to("Registro")
+    #         st.rerun()
+    # with col_nav2:
+    #     if st.session_state.user_ctx is None:
+    #         if st.button("🔒 Admin Login", use_container_width=True):
+    #             navigate_to("Login")
+    #             st.rerun()
+    #     else:
+    #         if st.button("📊 Dashboard Admin", use_container_width=True):
+    #             navigate_to("Admin")
+    #             st.rerun()
+    #         if st.button("🚪 Cerrar Sesión", use_container_width=True):
+    #             st.session_state.user_ctx = None
+    #             navigate_to("Inicio")
+    #             st.rerun()
     
 # 2. LOGIN ADMIN
 elif st.session_state.page == "Login":
