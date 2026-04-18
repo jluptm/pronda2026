@@ -930,9 +930,9 @@ if st.session_state.page != "Inicio":
 # 1. INIT PAGE
 if st.session_state.page == "Inicio":
     st.markdown("### Bienvenidos al Sistema de Gestión Ministerial Prondamin 2026")
-    st.info("Seleccione una opción a continuación para continuar:")
-    #st.image(os.path.join("assets", "enMantenimiento.png"), use_container_width=True)
-    #st.stop()
+    #st.info("Seleccione una opción a continuación para continuar:")
+    st.image(os.path.join("assets", "enMantenimiento.png"), use_container_width=True)
+    st.stop()
     col_nav1, col_nav2 = st.columns(2)
     with col_nav1:
         if st.button("📋 Consulta y Registro", use_container_width=True, type="primary"):
