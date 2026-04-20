@@ -618,6 +618,226 @@ def dropbox_to_raw(url: str) -> str:
     if "dl=0" in url or "dl=1" in url: return url.replace("dl=0", "raw=1").replace("dl=1", "raw=1")
     return url + "?raw=1" if url else ""
 
+def render_registration_form(prefix="reg", skip_password=False):
+    import datetime as dt
+    cedula_input = st.text_input("Ingrese Cédula o Pasaporte:", placeholder="Ej. 12345678", key=f"{prefix}_ced_in").strip()
+    
+    if cedula_input:
+        res_turso26 = busca_en_turso_pronda26(cedula_input)
+        res_turso25 = busca_en_turso_pronda25(cedula_input)
+        user_source = "new"
+        
+        # Diccionarios Defaults
+        defaults = {"NOMBRES": "", "APELLIDOS": "", "CATEGORIA": "", "DISTRITO": "", "EMAIL": "", "TELEFONOS": ""}
+        
+        if isinstance(res_turso26, pd.DataFrame) and not res_turso26.empty:
+            st.success("Cédula encontrada en Padrón 2026.")
+            defaults = res_turso26.iloc[0].to_dict()
+            user_source = "2026"
+        elif res_turso25:
+            user_source = "2025"
+            defaults.update({
+                "NOMBRES": res_turso25.get('NOMBRES2025', res_turso25.get('NOMBRES', '')),
+                "APELLIDOS": res_turso25.get('APELLIDOS2025', res_turso25.get('APELLIDOS', '')),
+                "CATEGORIA": res_turso25.get('CATEGORIA2025', res_turso25.get('CATEGORIA', '')),
+                "DISTRITO": res_turso25.get('DISTRITO2025', res_turso25.get('DISTRITO', '')),
+                "EMAIL": res_turso25.get('EMAIL2025', res_turso25.get('EMAIL', '')),
+                "TELEFONOS": res_turso25.get('TELEFONOS2025', res_turso25.get('TELEFONOS', ''))
+            })
+        else:
+            st.error("No se pudo proceder: La cédula no se encuentra en el Padrón 2025.")
+            st.info("Solo los usuarios registrados en 2025 pueden realizar su automatriculación. Si eres un nuevo usuario y/o tu cedula no está registrada en nuestra base de datos, por favor contacte a su administrador de distrito quien podrá ingresarlo desde el panel admin.")
+            return
+
+        st.write(f"### Bienvenid@ {defaults.get('NOMBRES')} {defaults.get('APELLIDOS')}")
+        
+        with st.expander("Certificados Anteriores (Prondamin)", expanded=False):
+            if res_turso25:
+                cols = st.columns(4)
+                for i, yr in enumerate(["2022", "2023", "2024", "2025"]):
+                    cert_val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}") or ""
+                    cert_url = str(cert_val).strip()
+                    if cert_url and cert_url not in ["nan", "None", ""]:
+                        cert_url = dropbox_to_raw(cert_url)
+                        with cols[i]:
+                            st.write(f"**{yr}**")
+                            try:
+                                st.image(cert_url, use_container_width=True)
+                            except:
+                                st.markdown(f'<img src="{cert_url}" style="width:100%">', unsafe_allow_html=True)
+            else:
+                st.write("Sin certificados anteriores disponibles.")
+                
+        st.write("---")
+        st.markdown("### Formulario de Actualización / Registro 2026")
+        
+        has_payment = False
+        if user_source == "2026":
+            ref = str(defaults.get('REFERENCIA', '')).strip()
+            if ref and ref not in ["-", "", "None", "nan", "0"]:
+                has_payment = True
+        
+        read_only = has_payment
+        
+        if read_only:
+            curr_status = defaults.get('Status', 'Pendiente')
+            if curr_status == 'Verificado':
+                sac.result(label='Excelente, su Inscripción y pago han sido Verificado', description=f"Status={curr_status}", status='success')
+            else:
+                sac.result(label='Ya inscrito en espera de revision de pago de la administración.', description=f"Status={curr_status}", status='warning')
+        elif user_source == "2026":
+            st.info("Usted ha sido pre-registrado por el administrador. Por favor complete sus detalles de pago para finalizar su inscripción.")
+
+        if f"{prefix}_fecha" not in st.session_state: st.session_state[f"{prefix}_fecha"] = dt.date.today()
+        if f"{prefix}_monto" not in st.session_state: st.session_state[f"{prefix}_monto"] = None
+        if f"{prefix}_ref" not in st.session_state: st.session_state[f"{prefix}_ref"] = ""
+        
+        col1, col2 = st.columns(2)
+        nombres = col1.text_input("Nombres", value=defaults.get('NOMBRES'), disabled=read_only, key=f"{prefix}_nom")
+        apellidos = col2.text_input("Apellidos", value=defaults.get('APELLIDOS'), disabled=read_only, key=f"{prefix}_ape")
+        
+        col3, col4 = st.columns(2)
+        
+        val_cat = str(defaults.get("CATEGORIA", "")).strip()
+        if val_cat in ["", "nan", "None"]: val_cat = "-"
+        if val_cat not in st.session_state.CATEGORIAS_LIST: st.session_state.CATEGORIAS_LIST.append(val_cat)
+        cat_idx = st.session_state.CATEGORIAS_LIST.index(val_cat)
+        categoria = col3.selectbox("Categoría", st.session_state.CATEGORIAS_LIST, index=cat_idx, disabled=True, key=f"{prefix}_cat")
+        
+        val_dist = str(defaults.get("DISTRITO", "")).strip()
+        if val_dist in ["", "nan", "None"]: val_dist = "-"
+        if val_dist not in st.session_state.DISTRITOS_LIST: st.session_state.DISTRITOS_LIST.append(val_dist)
+        dist_idx = st.session_state.DISTRITOS_LIST.index(val_dist)
+        distrito = col4.selectbox("Distrito", st.session_state.DISTRITOS_LIST, index=dist_idx, disabled=True, key=f"{prefix}_dist")
+        
+        emails = st.text_input("Correos Electrónicos", value=defaults.get('EMAIL'), disabled=read_only, key=f"{prefix}_em")
+        telefonos = st.text_input("Teléfonos", value=defaults.get('TELEFONOS'), disabled=read_only, key=f"{prefix}_tel")
+        
+        if not read_only:
+            st.write("---")
+            st.write("#### Detalles de Pago")
+            modalidad = sac.chip(items=[sac.ChipItem('Virtual'), sac.ChipItem('Presencial')], label='Modalidad', index=0, align='start', key=f"{prefix}_mod")
+            if not modalidad: modalidad = 'Virtual'
+            
+            fecha_str_eval = st.session_state[f"{prefix}_fecha"].strftime("%d-%m-%Y") if isinstance(st.session_state[f"{prefix}_fecha"], dt.date) else ""
+            monto_oficial = get_monto_a_pagar(fecha_str_eval, modalidad)
+            st.info(f"**Monto a Pagar ({modalidad}):** {monto_oficial:.2f}")
+            forma_pago = sac.chip(items=[sac.ChipItem('Pago Móvil'), sac.ChipItem('Transferencia'), sac.ChipItem('Otro')], label='Forma de Pago', index=0, align='start', key=f"{prefix}_fp")
+            if not forma_pago: forma_pago = 'Pago Móvil'
+        else:
+            forma_pago = "Otro"
+            modalidad = "Virtual"
+            monto_oficial = 0.0
+        
+        banco = ""
+        observacion_pago = ""
+        moneda = ""
+        admin_valid = False
+        fecha_pago = dt.date.today()
+        monto_pago = 0.0
+        referencia_pago = ""
+
+        if not read_only:
+            if forma_pago == "Otro":
+                if skip_password:
+                    admin_valid = True
+                else:
+                    clave_admf = st.text_input("Clave AdminF", type="password", key=f"{prefix}_clave")
+                    if clave_admf and verifica_clave_admin_f(clave_admf):
+                        admin_valid = True
+                    elif clave_admf:
+                        st.error("Clave Incorrecta o no autorizada.")
+                
+                if admin_valid:
+                    moneda = sac.chip(items=[sac.ChipItem('Dólares'), sac.ChipItem('Bolívares')], label='Pagado en', index=0, align='start', key=f"{prefix}_mon")
+                    if not moneda: moneda = 'Dólares'
+                    observacion_pago = st.text_input("Observación a pago extraordinario", key=f"{prefix}_obs")
+                    c5, c6, c7 = st.columns(3)
+                    try:
+                        fecha_pago = c5.date_input("Fecha de Pago", key=f"{prefix}_fecha", format="DD-MM-YYYY")
+                    except:
+                        fecha_pago = c5.date_input("Fecha de Pago", key=f"{prefix}_fecha")
+                    monto_pago = c6.number_input("Monto Pagado", key=f"{prefix}_monto", format="%.2f", min_value=0.00, placeholder=f"{monto_oficial:.2f}")
+                    referencia_pago = c7.text_input("Referencia", key=f"{prefix}_ref", placeholder="Referencia libre")
+            else:
+                c5, c6, c7 = st.columns(3)
+                try:
+                    fecha_pago = c5.date_input("Fecha de Pago", key=f"{prefix}_fecha", format="DD-MM-YYYY")
+                except:
+                    fecha_pago = c5.date_input("Fecha de Pago", key=f"{prefix}_fecha")
+                monto_pago = c6.number_input("Monto Pagado", key=f"{prefix}_monto", format="%.2f", min_value=0.00, placeholder=f"{monto_oficial:.2f}")
+                
+                if forma_pago == "Transferencia":
+                    banco = c5.selectbox("Banco Emisor", options=BANCOS_OPCIONES, key=f"{prefix}_bco")
+                    st.session_state[f"{prefix}_ref"] = ''.join(filter(str.isdigit, str(st.session_state[f"{prefix}_ref"])))[:8]
+                    referencia_pago = c7.text_input("Referencia", key=f"{prefix}_ref", max_chars=8, placeholder="########")
+                else: # Pago Móvil
+                    st.session_state[f"{prefix}_ref"] = ''.join(filter(str.isdigit, str(st.session_state[f"{prefix}_ref"])))[:6]
+                    referencia_pago = c7.text_input("Referencia", key=f"{prefix}_ref", max_chars=6, placeholder="######")
+
+        if read_only or (forma_pago == "Otro" and not admin_valid):
+            guardar = st.button("Procesar Registro", type="primary", use_container_width=True, disabled=True, key=f"{prefix}_btn_dis")
+        else:
+            guardar = st.button("Procesar Registro", type="primary", use_container_width=True, key=f"{prefix}_btn")
+        
+        if guardar:
+            errores = []
+            if not nombres.strip(): errores.append("Nombres es obligatorio.")
+            if not apellidos.strip(): errores.append("Apellidos es obligatorio.")
+            if not categoria.strip(): errores.append("Categoría es obligatoria.")
+            if not distrito.strip(): errores.append("Distrito es obligatorio.")
+            if not telefonos.strip(): errores.append("Teléfonos es obligatorio.")
+            
+            import re
+            if not emails.strip():
+                errores.append("Correos es obligatorio.")
+            else:
+                lista_emails = [e.strip() for e in emails.replace(",", " ").split() if e.strip()]
+                regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+                for email in lista_emails:
+                    if not re.match(regex, email):
+                        errores.append(f"El correo '{email}' no tiene un formato válido.")
+            
+            if (monto_pago or 0.0) <= 0: errores.append("El Monto Pagado es obligatorio y debe ser mayor a 0.")
+            if forma_pago in ["Pago Móvil", "Transferencia"]:
+                if abs((monto_pago or 0.0) - monto_oficial) > 100:
+                    errores.append(f"La diferencia entre el Monto Pagado ({monto_pago}) y a Pagar ({monto_oficial:.2f}) supera el margen permitido de 100.")
+            
+            referencia_pago = str(referencia_pago)
+            if not referencia_pago.strip():
+                errores.append("La Referencia es obligatoria.")
+            else:
+                if forma_pago != "Otro":
+                    if not referencia_pago.isdigit():
+                        errores.append("La referencia solo puede contener números para Pago Móvil / Transferencia.")
+                    elif len(referencia_pago.strip()) < 6:
+                        errores.append("La referencia debe tener al menos 6 dígitos para Pago Móvil o Transferencia.")
+                if not verifica_referencia_unica(referencia_pago):
+                    errores.append(f"La referencia '{referencia_pago}' ya se encuentra registrada en el sistema.")
+                
+            if errores:
+                error_dialog(errores)
+            else:
+                with st.spinner("Subiendo datos..."):
+                    # Aqui iría la subida a R2 si hubiera archivo, pero el original lo maneja.
+                    # Simplifico para el upsert
+                    fecha_str = fecha_pago.strftime("%d-%m-%Y") if fecha_pago else ""
+                    values_dict = {
+                        "CEDULA": cedula_input, "NOMBRES": nombres, "APELLIDOS": apellidos,
+                        "CATEGORIA": categoria, "DISTRITO": distrito, "EMAIL": emails, "TELEFONOS": telefonos,
+                        "FORMA_PAGO": forma_pago, "FECHA_PAGO": fecha_str, "MONTO_PAGO": monto_pago,
+                        "REFERENCIA": referencia_pago, "ARCHIVO_PAGO": "", "CURSO_INSCRITO": "-",
+                        "MONTO_A_PAGAR": monto_oficial, "MODALIDAD": modalidad, "BancoE": banco,
+                        "ObservaciónPE": observacion_pago, "pagoEn": moneda,
+                        "FECHA_REGISTRO": dt.datetime.now().isoformat(), "Status": "Pendiente"
+                    }
+                    try:
+                        upsert_full_user_admin(values_dict)
+                        success_dialog()
+                        st.balloons()
+                    except Exception as e:
+                        st.error(f"Error base de datos: {e}")
+
 # -------------------------------------------------------------------
 # MANEJO DE ESTADO DE SESIÓN Y ENRRUTAMIENTO STREAMLIT
 # -------------------------------------------------------------------
@@ -1127,7 +1347,7 @@ elif st.session_state.page == "Admin":
                             st.write("---")
                             render_admin_charts(df_full)
                         with tab2:
-                            df_table_global = df_full[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
+                            df_table_global = df_full[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
                             st.dataframe(style_user_table(df_table_global.style), use_container_width=True)
                         with tab3:
                             st.markdown("### Tabla databank (Cargas Bancarias)")
@@ -1267,7 +1487,7 @@ elif st.session_state.page == "Admin":
                                 df_to_edit['Manual'] = False  # Columna para el checkbox
                                 
                                 # Columnas a mostrar
-                                cols_show = ['NOMBRES', 'APELLIDOS', 'CEDULA-U', 'Fecha', 'Referencia', 'Monto', 'MONTO_A_PAGAR', 'difReal', 'Manual']
+                                cols_show = ['NOMBRES', 'APELLIDOS', 'CEDULA-U', 'DISTRITO', 'Fecha', 'Referencia', 'Monto', 'MONTO_A_PAGAR', 'difReal', 'Manual']
                                 
                                 edited_df = st.data_editor(
                                     df_to_edit[cols_show],
@@ -1276,6 +1496,7 @@ elif st.session_state.page == "Admin":
                                         "NOMBRES": st.column_config.Column(disabled=True),
                                         "APELLIDOS": st.column_config.Column(disabled=True),
                                         "CEDULA-U": st.column_config.Column(disabled=True),
+                                        "DISTRITO": st.column_config.Column(disabled=True),
                                         "Fecha": st.column_config.Column(disabled=True),
                                         "Referencia": st.column_config.Column(disabled=True),
                                         "Monto": st.column_config.Column(disabled=True),
@@ -1297,6 +1518,14 @@ elif st.session_state.page == "Admin":
                                 st.success("No hay registros pendientes de verificación manual con cédula asignada.")
                         else:
                             st.write("No hay datos en Databank.")
+
+                # SECCIÓN MATRICULACIÓN ESPECIAL (Solo Admin)
+                if tipo_acceso.strip(" []").lower() in ["total", "financiero", "develop", "financiero"]:
+                    with st.expander("✨ Matriculación Especial", expanded=False):
+                        st.markdown("### Registro Administrativo Directo")
+                        st.info("Esta sección permite registrar pagos sin la validación de clave AdminF para el método 'Otro'.")
+                        render_registration_form(prefix="spec", skip_password=True)
+
 
 
                 # LISTADO POR DISTRITO
@@ -1327,7 +1556,7 @@ elif st.session_state.page == "Admin":
                             if is_limited:
                                 df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'inscrito', 'Status']]
                             else:
-                                df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA','CATEGORIA', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
+                                df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
                             st.dataframe(style_user_table(df_table_dist.style), use_container_width=True)
 
                         if not is_limited and not is_total_dist:
@@ -1384,305 +1613,9 @@ elif st.session_state.page == "Admin":
 elif st.session_state.page == "Registro":
     st.markdown("## Consulta y Registro 2026")
     
-    cedula_input = st.text_input("Ingrese su Cédula o Pasaporte:", placeholder="Ej. 12345678").strip()
-    
-    if cedula_input:
-        res_turso26 = busca_en_turso_pronda26(cedula_input)
-        res_turso25 = busca_en_turso_pronda25(cedula_input)
-        user_source = "new"
-        
-        # Diccionarios Defaults
-        defaults = {"NOMBRES": "", "APELLIDOS": "", "CATEGORIA": "", "DISTRITO": "", "EMAIL": "", "TELEFONOS": ""}
-        pago_info = None
-        
-        if isinstance(res_turso26, pd.DataFrame) and not res_turso26.empty:
-            st.success("Cédula encontrada en Padrón 2026.")
-            defaults = res_turso26.iloc[0].to_dict()
-            user_source = "2026"
-            pago_info = defaults
-        elif res_turso25:
-            user_source = "2025"
-            defaults.update({
-                "NOMBRES": res_turso25.get('NOMBRES2025', res_turso25.get('NOMBRES', '')),
-                "APELLIDOS": res_turso25.get('APELLIDOS2025', res_turso25.get('APELLIDOS', '')),
-                "CATEGORIA": res_turso25.get('CATEGORIA2025', res_turso25.get('CATEGORIA', '')),
-                "DISTRITO": res_turso25.get('DISTRITO2025', res_turso25.get('DISTRITO', '')),
-                "EMAIL": res_turso25.get('EMAIL2025', res_turso25.get('EMAIL', '')),
-                "TELEFONOS": res_turso25.get('TELEFONOS2025', res_turso25.get('TELEFONOS', ''))
-            })
-        else:
-            st.error("No se pudo proceder: La cédula no se encuentra en el Padrón 2025.")
-            st.info("Solo los usuarios registrados en 2025 pueden realizar su automatriculación. Si eres un nuevo usuario y/o tu cedula no está registrada en nuestra base de datos, por favor contacte a su administrador de distrito quien podrá ingresarlo desde el panel admin.")
-            st.stop()
+    render_registration_form(prefix="reg", skip_password=False)
 
-        
-        st.write(f"### Bienvenid@ {defaults.get('NOMBRES')} {defaults.get('APELLIDOS')}")
-        
-        # Certificados Anteriores (Desde 2025 data, asumiendo campos certificado2022 o CERTIFICADO2022)
-        with st.expander("Certificados Anteriores (Prondamin)", expanded=False):
-            if res_turso25:
-                cols = st.columns(4)
-                for i, yr in enumerate(["2022", "2023", "2024", "2025"]):
-                    cert_val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}") or ""
-                    cert_url = str(cert_val).strip()
-                    if cert_url and cert_url not in ["nan", "None", ""]:
-                        cert_url = dropbox_to_raw(cert_url)
-                        with cols[i]:
-                            st.write(f"**{yr}**")
-                            # El render de st.image de un URL remoto a veces falla si el host restringe CORS, markdown es mejor fallback:
-                            try:
-                                st.image(cert_url, use_container_width=True)
-                            except:
-                                st.markdown(f'<img src="{cert_url}" style="width:100%">', unsafe_allow_html=True)
-            else:
-                st.write("Sin certificados anteriores disponibles.")
-                
-        # FORMULARIO
-        st.write("---")
-        st.markdown("### Formulario de Actualización / Registro 2026")
-        
-        # DETERMINAR SI ES SOLO LECTURA (Si ya tiene pago registrado)
-        has_payment = False
-        if user_source == "2026":
-            ref = str(defaults.get('REFERENCIA', '')).strip()
-            # Si tiene una referencia real (no es guión ni vacío), es read_only
-            if ref and ref not in ["-", "", "None", "nan", "0"]:
-                has_payment = True
-        
-        read_only = has_payment
-        
-        if read_only:
-            curr_status = defaults.get('Status', 'Pendiente')
-            if curr_status == 'Verificado':
-                sac.result(
-                    label='Excelente, su Inscripción y pago han sido Verificado',
-                    description=f"Status={curr_status}",
-                    status='success'
-                )
-            else:
-                sac.result(
-                    label='Ya inscrito en espera de revision de pago de la administración.',
-                    description=f"Status={curr_status}",
-                    status='warning'
-                )
-        elif user_source == "2026":
-            st.info("Usted ha sido pre-registrado por el administrador. Por favor complete sus detalles de pago para finalizar su inscripción.")
 
-        
-        # Inicializar Componentes Claves con Session State bindings
-        import datetime as dt
-        if "reg_fecha" not in st.session_state: st.session_state.reg_fecha = dt.date.today()
-        if "reg_monto" not in st.session_state: st.session_state.reg_monto = None
-        if "reg_ref" not in st.session_state: st.session_state.reg_ref = ""
-        if "processed_file_id" not in st.session_state: st.session_state.processed_file_id = ""
-        
-        c1, c2 = st.columns(2)
-        nombres = c1.text_input("Nombres", value=defaults.get('NOMBRES'), disabled=read_only)
-        apellidos = c2.text_input("Apellidos", value=defaults.get('APELLIDOS'), disabled=read_only)
-        
-        c3, c4 = st.columns(2)
-        
-        # Normalizar Categoría para Registro
-        val_cat = str(defaults.get("CATEGORIA", "")).strip()
-        if val_cat in ["", "nan", "None"]: val_cat = "-"
-        if val_cat not in st.session_state.CATEGORIAS_LIST:
-            st.session_state.CATEGORIAS_LIST.append(val_cat)
-        
-        cat_idx = st.session_state.CATEGORIAS_LIST.index(val_cat)
-        categoria = c3.selectbox("Categoría", st.session_state.CATEGORIAS_LIST, index=cat_idx, disabled=True)
-        
-        # Normalizar Distrito para Registro
-        val_dist = str(defaults.get("DISTRITO", "")).strip()
-        if val_dist in ["", "nan", "None"]: val_dist = "-"
-        if val_dist not in st.session_state.DISTRITOS_LIST:
-            st.session_state.DISTRITOS_LIST.append(val_dist)
-            
-        dist_idx = st.session_state.DISTRITOS_LIST.index(val_dist)
-        distrito = c4.selectbox("Distrito", st.session_state.DISTRITOS_LIST, index=dist_idx, disabled=True)
-        
-        
-        emails = st.text_input("Correos Electrónicos", value=defaults.get('EMAIL'), disabled=read_only)
-        telefonos = st.text_input("Teléfonos", value=defaults.get('TELEFONOS'), disabled=read_only)
-        
-        if not read_only:
-            st.write("---")
-            st.write("#### Detalles de Pago")
-        
-            modalidad = sac.chip(
-                items=[sac.ChipItem('Virtual'), sac.ChipItem('Presencial')],
-                label='Modalidad',
-                index=0,
-                align='start'
-            )
-            if not modalidad: modalidad = 'Virtual'
-            
-            # Obtenemos monto a pagar de la DB APagar
-            fecha_str_eval = st.session_state.reg_fecha.strftime("%d-%m-%Y") if isinstance(st.session_state.reg_fecha, dt.date) else ""
-            monto_oficial = get_monto_a_pagar(fecha_str_eval, modalidad)
-            st.info(f"**Monto a Pagar ({modalidad}):** {monto_oficial:.2f}")
-            forma_pago = sac.chip(
-                items=[sac.ChipItem('Pago Móvil'), sac.ChipItem('Transferencia'), sac.ChipItem('Otro')],
-                label='Forma de Pago',
-                index=0,
-                align='start'
-            )
-            if not forma_pago: forma_pago = 'Pago Móvil'
-        else:
-            forma_pago = "Otro"
-            modalidad = "Virtual"
-        
-        uploaded_file = None
-        banco = ""
-        observacion_pago = ""
-        moneda = ""
-        admin_valid = False
-
-        if read_only:
-            fecha_pago = dt.date.today()
-            monto_pago = 0.0
-            referencia_pago = ""
-        else:
-            if forma_pago == "Otro":
-                clave_admf = st.text_input("Clave AdminF", type="password")
-                if clave_admf:
-                    if verifica_clave_admin_f(clave_admf):
-                        admin_valid = True
-                    else:
-                        st.error("Clave Incorrecta o no autorizada.")
-                
-                if admin_valid:
-                    moneda = sac.chip(
-                        items=[sac.ChipItem('Dólares'), sac.ChipItem('Bolívares')],
-                        label='Pagado en',
-                        index=0,
-                        align='start'
-                    )
-                    if not moneda: moneda = 'Dólares'
-                    
-                    observacion_pago = st.text_input("Observación a pago extraordinario")
-                    c5, c6, c7 = st.columns(3)
-                    try:
-                        fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", format="DD-MM-YYYY")
-                    except:
-                        fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha")
-                    monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}")
-                    # Referencia libre
-                    st.session_state.reg_ref = str(st.session_state.reg_ref)
-                    referencia_pago = c7.text_input("Referencia", key="reg_ref", placeholder="Referencia libre")
-                else:
-                    fecha_pago = dt.date.today()
-                    monto_pago = 0.0
-                    referencia_pago = ""
-            else:
-                c5, c6, c7 = st.columns(3)
-                try:
-                    fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha", format="DD-MM-YYYY", help="Fecha en la que realizó el pago.")
-                except:
-                    fecha_pago = c5.date_input("Fecha de Pago", key="reg_fecha")
-                monto_pago = c6.number_input("Monto Pagado", key="reg_monto", format="%.2f", min_value=0.00, max_value=999999.99, placeholder=f"{monto_oficial:.2f}", help="Monto exacto que pagó. En Bolívares. Máximo 6 dígitos enteros y 2 decimales")
-                
-                if forma_pago == "Transferencia":
-                    banco = c5.selectbox("Banco Emisor", options=BANCOS_OPCIONES)
-                    st.session_state.reg_ref = ''.join(filter(str.isdigit, st.session_state.reg_ref))[:8]
-                    referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=8, placeholder="########", help="Ingresa los dígitos de su comprobante (mínimo 6 dígitos). Solo números.")
-                else: # Pago Móvil
-                    st.session_state.reg_ref = ''.join(filter(str.isdigit, st.session_state.reg_ref))[:6]
-                    referencia_pago = c7.text_input("Referencia", key="reg_ref", max_chars=6, placeholder="######", help="Ingresa los últimos 6 dígitos de la referencia. Solo números (máximo 6)")
-
-        if read_only or (forma_pago == "Otro" and not admin_valid):
-            guardar = st.button("Procesar Registro", type="primary", use_container_width=True, disabled=True)
-        else:
-            guardar = st.button("Procesar Registro", type="primary", use_container_width=True)
-        
-        if guardar:
-            errores = []
-            
-            nombres = nombres or ""
-            apellidos = apellidos or ""
-            categoria = categoria or ""
-            distrito = distrito or ""
-            telefonos = telefonos or ""
-            emails = emails or ""
-            referencia_pago = referencia_pago or ""
-
-            if not nombres.strip(): errores.append("Nombres es obligatorio.")
-            if not apellidos.strip(): errores.append("Apellidos es obligatorio.")
-            if not categoria.strip(): errores.append("Categoría es obligatoria.")
-            if not distrito.strip(): errores.append("Distrito es obligatorio.")
-            if not telefonos.strip(): errores.append("Teléfonos es obligatorio.")
-            
-            import re
-            if not emails.strip():
-                errores.append("Correos es obligatorio.")
-            else:
-                lista_emails = [e.strip() for e in emails.replace(",", " ").split() if e.strip()]
-                regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
-                for email in lista_emails:
-                    if not re.match(regex, email):
-                        errores.append(f"El correo '{email}' no tiene un formato válido.")
-            
-            monto_pago = monto_pago or 0.0
-            if monto_pago <= 0:
-                errores.append("El Monto Pagado es obligatorio y debe ser mayor a 0.")
-                
-            if forma_pago in ["Pago Móvil", "Transferencia"]:
-                if abs(monto_pago - monto_oficial) > 100:
-                    errores.append(f"La diferencia entre el Monto Pagado ({monto_pago}) y a Pagar ({monto_oficial:.2f}) supera el margen permitido de 100.")
-            
-            if not referencia_pago.strip():
-                errores.append("La Referencia es obligatoria.")
-            else:
-                if forma_pago != "Otro":
-                    if not referencia_pago.isdigit():
-                        errores.append("La referencia solo puede contener números para Pago Móvil / Transferencia.")
-                    elif len(referencia_pago.strip()) < 6:
-                        errores.append("La referencia debe tener al menos 6 dígitos para Pago Móvil o Transferencia.")
-                
-                # Check Uniqueness for all cases
-                if not verifica_referencia_unica(referencia_pago):
-                    errores.append(f"La referencia '{referencia_pago}' ya se encuentra registrada en el sistema.")
-                
-            if errores:
-                error_dialog(errores)
-            else:
-                with st.spinner("Subiendo datos y captura a Turso y R2..."):
-                    img_path = ""
-                    # Subir a R2
-                    if uploaded_file and s3_client:
-                        fname = f"capture_{cedula_input}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uploaded_file.name}"
-                        try:
-                            s3_client.put_object(
-                                Bucket=R2_BUCKET_NAME, Key=fname,
-                                Body=uploaded_file.getvalue(), ContentType=uploaded_file.type
-                            )
-                            img_path = f"{R2_PUBLIC_URL}/{fname}".replace('//capture', '/capture') if R2_PUBLIC_URL else fname
-                        except Exception as e:
-                            st.error(f"Error subiendo a R2: {e}")
-
-                    # Formateo String de Fecha
-                    fecha_str = fecha_pago.strftime("%d-%m-%Y") if fecha_pago else ""
-
-                    # Insertar a BD Turso (Agregar MONTO_A_PAGAR como monto_oficial loggeado)
-                    values_dict = {
-                        "CEDULA": cedula_input, "NOMBRES": nombres, "APELLIDOS": apellidos,
-                        "CATEGORIA": categoria, "DISTRITO": distrito, "EMAIL": emails, "TELEFONOS": telefonos,
-                        "FORMA_PAGO": forma_pago, "FECHA_PAGO": fecha_str, "MONTO_PAGO": monto_pago if monto_pago is not None else 0.0,
-                        "REFERENCIA": referencia_pago, "ARCHIVO_PAGO": img_path, "CURSO_INSCRITO": "-",
-                        "MONTO_A_PAGAR": monto_oficial,
-                        "MODALIDAD": modalidad,
-                        "BancoE": banco,
-                        "ObservaciónPE": observacion_pago,
-                        "pagoEn": moneda,
-                        "FECHA_REGISTRO": datetime.now().isoformat(),
-                        "Status": "Pendiente"
-                    }
-                    
-                    try:
-                        upsert_full_user_admin(values_dict)
-                        success_dialog()
-                        st.balloons()
-                    except Exception as e:
-                        st.error(f"Error base de datos: {e}")
 
 # Flujo de Navegación Inferior
 if st.session_state.page != "Inicio":
