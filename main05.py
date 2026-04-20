@@ -328,24 +328,45 @@ def check_and_create_databank_table(): return run_async(_check_and_create_databa
 def insert_bank_data(df): return run_async(_insert_bank_data(df))
 
 async def _load_merged_data(districts):
-    common_cols = ['CEDULA', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'Status', 'REFERENCIA', 'CURSO_INSCRITO', '_source']
+    common_cols = ['CEDULA', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'MODALIDAD', 'Status', 'REFERENCIA', 'CURSO_INSCRITO', '_source']
     
     df_2025 = await _get_df_from_turso("pronda_2025")
     if not df_2025.empty:
         df_2025['CEDULA'] = df_2025['CEDULA'].astype(str).str.strip()
-        df_2025 = df_2025.rename(columns={'NOMBRES2025': 'NOMBRES', 'APELLIDOS2025': 'APELLIDOS', 'DISTRITO2025': 'DISTRITO', 'CATEGORIA2025': 'CATEGORIA', 'EMAIL2025': 'EMAIL', 'TELEFONOS2025': 'TELEFONOS'})
+        # Mapeos conocidos
+        df_2025 = df_2025.rename(columns={
+            'NOMBRES2025': 'NOMBRES', 'APELLIDOS2025': 'APELLIDOS', 
+            'DISTRITO2025': 'DISTRITO', 'CATEGORIA2025': 'CATEGORIA', 
+            'EMAIL2025': 'EMAIL', 'TELEFONOS2025': 'TELEFONOS'
+        })
+        # Búsqueda insensible a mayúsculas para las columnas comunes
+        for col in common_cols:
+            if col not in df_2025.columns:
+                match = next((c for c in df_2025.columns if c.lower() == col.lower()), None)
+                if match:
+                    df_2025 = df_2025.rename(columns={match: col})
+        
         df_2025['_source'] = '2025'
         if 'Status' not in df_2025.columns: df_2025['Status'] = "No Inscrito"
         for col in common_cols:
-            if col not in df_2025.columns: df_2025[col] = None
+            if col not in df_2025.columns:
+                df_2025[col] = "-" if col == "MODALIDAD" else None
         df_2025 = df_2025[common_cols]
 
     df_2026 = await _get_df_from_turso("prondamin2026BB")
     if not df_2026.empty:
         df_2026['CEDULA'] = df_2026['CEDULA'].astype(str).str.strip()
+        # Búsqueda insensible a mayúsculas para las columnas comunes
+        for col in common_cols:
+            if col not in df_2026.columns:
+                match = next((c for c in df_2026.columns if c.lower() == col.lower()), None)
+                if match:
+                    df_2026 = df_2026.rename(columns={match: col})
+                    
         df_2026['_source'] = '2026'
         for col in common_cols:
-            if col not in df_2026.columns: df_2026[col] = None
+            if col not in df_2026.columns:
+                df_2026[col] = "-" if col == "MODALIDAD" else None
         df_2026 = df_2026[common_cols]
 
     if df_2025.empty and df_2026.empty: return pd.DataFrame()
@@ -358,7 +379,8 @@ async def _load_merged_data(districts):
     merged = merged[~mask_dup].copy()
     
     merged['is_new'] = merged['CEDULA'].isin(cedulas_2026 - cedulas_2025)
-    merged['Status'] = merged['Status'].fillna('No Inscrito').replace('', 'No Inscrito')
+    merged['Status'] = merged['Status'].fillna('No Inscrito').replace(['', 'None', 'nan'], 'No Inscrito')
+    merged['MODALIDAD'] = merged['MODALIDAD'].fillna('-').replace(['', 'None', 'nan'], '-')
     merged['inscrito'] = merged['Status'].apply(lambda x: "✅" if x in ["Pendiente", "Verificado"] else "❌")
     
     merged['distrito_final'] = merged['DISTRITO'].astype(str).str.strip()
@@ -1347,7 +1369,7 @@ elif st.session_state.page == "Admin":
                             st.write("---")
                             render_admin_charts(df_full)
                         with tab2:
-                            df_table_global = df_full[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
+                            df_table_global = df_full[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'MODALIDAD', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
                             st.dataframe(style_user_table(df_table_global.style), use_container_width=True)
                         with tab3:
                             st.markdown("### Tabla databank (Cargas Bancarias)")
@@ -1554,9 +1576,9 @@ elif st.session_state.page == "Admin":
                             
                         with tab2:
                             if is_limited:
-                                df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'inscrito', 'Status']]
+                                df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'MODALIDAD', 'inscrito', 'Status']]
                             else:
-                                df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
+                                df_table_dist = dist_df[['NOMBRES', 'APELLIDOS', 'CEDULA', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'MODALIDAD', 'inscrito', 'Status', 'REFERENCIA', 'CURSO_INSCRITO']]
                             st.dataframe(style_user_table(df_table_dist.style), use_container_width=True)
 
                         if not is_limited and not is_total_dist:
