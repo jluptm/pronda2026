@@ -1373,7 +1373,25 @@ elif st.session_state.page == "Admin":
                             st.dataframe(style_user_table(df_table_global.style), use_container_width=True)
                         with tab3:
                             st.markdown("### Tabla databank (Cargas Bancarias)")
-                            render_databank_table(get_databank_df())
+                            df_db_current = get_databank_df()
+                            df_rendered = render_databank_table(df_db_current)
+                            
+                            # Acción de Sincronización Manual
+                            if df_rendered is not None and not df_rendered.empty:
+                                # Filtrar los que visualmente son Verificados (check verde) pero Status es Pendiente
+                                to_sync = df_rendered[
+                                    (df_rendered['CEDULA-U'] != "No Asignado") & 
+                                    (df_rendered['Verificado'] == "✅") &
+                                    (df_rendered['Status'] == "Pendiente")
+                                ]
+                                if not to_sync.empty:
+                                    st.info(f"💡 Se detectaron **{len(to_sync)}** registros con conciliación bancaria exitosa (✅) que aún figuran como 'Pendiente' en la tabla maestra.")
+                                    if st.button(f"🚀 Registrar {len(to_sync)} Verificados en Tabla Maestra", use_container_width=True, type="primary", key="btn_sync_tab3"):
+                                        cedulas = to_sync['CEDULA-U'].tolist()
+                                        updated = bulk_update_status_verificado(cedulas)
+                                        st.success(f"✅ ¡Sincronización exitosa! Se han actualizado {updated} registros.")
+                                        st.balloons()
+                                        st.rerun()
                 
                 # SECCIÓN CARGA DE DATA BANCARIA (Solo para Total, Develop y Financiero)
                 if tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]:
