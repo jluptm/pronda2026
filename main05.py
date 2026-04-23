@@ -118,6 +118,10 @@ async def _get_df_from_turso(table_name):
         result = await client.execute(f"SELECT * FROM {table_name}")
         return pd.DataFrame(result.rows, columns=result.columns)
 
+@st.cache_data(ttl=600)
+def get_df_from_turso(table_name):
+    return run_async(_get_df_from_turso(table_name))
+
 async def _busca_en_turso_pronda26(cedula: str):
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
         result = await client.execute("SELECT * FROM prondamin2026BB WHERE CEDULA = ?", [cedula])
@@ -190,38 +194,49 @@ async def _process_pagos_2026():
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
         # 1. Obtener registros de prondamin2026BB
         res_reg = await client.execute("SELECT CEDULA, REFERENCIA FROM prondamin2026BB")
+        
         # Diccionario de reg_ref -> CEDULA (para búsqueda rápida)
-        # Limpiamos reg_ref: solo números, mínimo 4 dígitos
         registros = {}
         for row in res_reg.rows:
             cedula = str(row[0]).strip()
-            ref_raw = ''.join(filter(str.isdigit, str(row[1])))
+            # Limpieza robusta: manejar decimales .0 de Excel y luego solo dígitos
+            ref_str = str(row[1]).strip()
+            if ref_str.endswith(".0"): ref_str = ref_str[:-2]
+            ref_raw = ''.join(filter(str.isdigit, ref_str))
+            
             if len(ref_raw) >= 4:
                 registros[ref_raw] = cedula
 
         # 2. Obtener registros de databank que no tengan CEDULA-U o sea No Asignado
-        res_bank = await client.execute("SELECT id, Referencia FROM databank")
+        # Usamos comillas dobles para la columna con guion
+        res_bank = await client.execute('SELECT id, Referencia FROM databank WHERE "CEDULA-U" IS NULL OR "CEDULA-U" = \'No Asignado\'')
         
         statements = []
         count_assigned = 0
         
         for row in res_bank.rows:
             bid = row[0]
-            bref_raw = ''.join(filter(str.isdigit, str(row[1])))
+            b_ref_str = str(row[1]).strip()
+            if b_ref_str.endswith(".0"): b_ref_str = b_ref_str[:-2]
+            bref_raw = ''.join(filter(str.isdigit, b_ref_str))
             
+            if not bref_raw:
+                continue
+                
             cedula_found = "No Asignado"
-            # Criterio: buscar si alguna reg_ref (4 a 8 dígitos) coincide con el final de bref_raw
-            # Optimizamos: probamos longitudes de 4, 5, 6, 7, 8 al final de bref_raw
+            # Criterio mejorado: búsqueda en ambos sentidos
             for r_ref, r_ced in registros.items():
-                if len(r_ref) >= 4 and bref_raw.endswith(r_ref):
+                # Si la referencia del banco termina en la del usuario O viceversa
+                if (bref_raw.endswith(r_ref) or r_ref.endswith(bref_raw)):
                     cedula_found = r_ced
                     count_assigned += 1
                     break
             
-            statements.append(libsql.Statement(
-                "UPDATE databank SET 'CEDULA-U' = ? WHERE id = ?",
-                [cedula_found, bid]
-            ))
+            if cedula_found != "No Asignado":
+                statements.append(libsql.Statement(
+                    'UPDATE databank SET "CEDULA-U" = ? WHERE id = ?',
+                    [cedula_found, bid]
+                ))
             
         if statements:
             await client.batch(statements)
@@ -251,6 +266,7 @@ async def _get_databank_df():
         except Exception:
             return pd.DataFrame()
 
+@st.cache_data(ttl=600)
 def get_databank_df(): return run_async(_get_databank_df())
 
 async def _bulk_update_status_verificado(cedulas):
@@ -390,6 +406,7 @@ async def _load_merged_data(districts):
         
     return merged
 
+@st.cache_data(ttl=600)
 def load_merged_data(districts): return run_async(_load_merged_data(districts))
 
 def render_admin_charts(df_input):
@@ -481,36 +498,49 @@ def render_databank_table(df_db):
         axis=1
     )
     
-    def highlight_row(row):
-        val = str(row.get('CEDULA-U', 'No Asignado'))
-        is_assigned = val not in ["No Asignado", "", "None", "nan"]
-        is_verified = row.get('Verificado') == "✅"
-        if is_assigned:
-            if is_verified:
-                return ['background-color: #4CAF50; color: white;' for _ in row]
-            else:
-                return ['background-color: #FFFF00; color: #000000;' for _ in row]
-        return ['' for _ in row]
+    # Vectorización de colores para databank
+    styles = pd.DataFrame('', index=df_show.index, columns=df_show.columns)
     
-    def color_diff(val):
-        return 'background-color: #4CAF50; color: white;' if val >= 0 else 'background-color: #F44336; color: white;'
+    if 'CEDULA-U' in df_show.columns:
+        assigned = ~df_show['CEDULA-U'].isin(["No Asignado", "", "None", "nan"])
+        verified = df_show['Verificado'] == "✅"
+        
+        # Resaltado de filas asignadas y verificadas
+        mask_v = assigned & verified
+        mask_p = assigned & ~verified
+        
+        for col in df_show.columns:
+            styles.loc[mask_v, col] = 'background-color: #4CAF50; color: white;'
+            styles.loc[mask_p, col] = 'background-color: #FFFF00; color: #000000;'
 
-    styler = df_show.style.apply(highlight_row, axis=1)
-    styler = styler.applymap(color_diff, subset=['difUpagos', 'difRec', 'difReal'])
+    styler = df_show.style.apply(lambda _: styles, axis=None)
+    
+    # Colores para las diferencias (vectorizado)
+    def get_diff_color(series):
+        return ['background-color: #4CAF50; color: white;' if v >= 0 else 'background-color: #F44336; color: white;' for v in series]
+        
+    styler = styler.apply(get_diff_color, subset=['difUpagos', 'difRec', 'difReal'])
     styler = styler.format({'difUpagos': "{:.2f}", 'difRec': "{:.2f}", 'difReal': "{:.2f}", 'Monto': "{:.2f}", 'MONTO_PAGO': "{:.2f}", 'MONTO_A_PAGAR': "{:.2f}"})
     
     st.dataframe(styler, use_container_width=True)
     return df_show
 
 def style_user_table(styler):
-    def highlight_status(row):
-        status = row.get('Status', '')
-        if status == 'Verificado':
-            return ['background-color: #4CAF50; color: white;' for _ in row]
-        elif status == 'Pendiente':
-            return ['background-color: #FFFF00; color: #000000;' for _ in row]
-        return ['' for _ in row]
-    return styler.apply(highlight_status, axis=1)
+    df = styler.data
+    styles = pd.DataFrame('', index=df.index, columns=df.columns)
+    
+    if 'Status' in df.columns:
+        verificados = df['Status'] == 'Verificado'
+        pendientes = df['Status'] == 'Pendiente'
+        
+        # Optimizamos coloreando solo las columnas esenciales o toda la fila si es necesario
+        # Para máxima velocidad en el navegador con 2000 filas, colorear menos columnas ayuda
+        cols_to_style = df.columns # O puedes listar ['Status', 'CEDULA', 'NOMBRES', 'APELLIDOS']
+        for col in cols_to_style:
+            styles.loc[verificados, col] = 'background-color: #E0FFE0; color: black;' # Verde claro
+            styles.loc[pendientes, col] = 'background-color: #FFFFE0; color: black;'  # Amarillo claro
+            
+    return styler.apply(lambda _: styles, axis=None)
 
 @st.dialog("Confirmar Registro Manual")
 def confirm_manual_verification(to_list):
@@ -535,7 +565,12 @@ def confirm_manual_verification(to_list):
     if c2.button("❌ No", use_container_width=True):
         st.rerun()
 
+    if c2.button("❌ No", use_container_width=True):
+        st.rerun()
+
+@st.cache_data(ttl=600)
 def busca_en_turso_pronda26(cedula): return run_async(_busca_en_turso_pronda26(cedula))
+@st.cache_data(ttl=600)
 def busca_en_turso_pronda25(cedula): return run_async(_busca_en_turso_pronda25(cedula))
 def login_admin(username, password): return run_async(_login_admin(username, password))
 def verifica_clave_admin_f(clave): return run_async(_verifica_clave_admin_f(clave))
@@ -604,7 +639,6 @@ async def _verifica_referencia_unica(referencia):
 
 def verifica_referencia_unica(referencia): return run_async(_verifica_referencia_unica(referencia))
 
-def load_merged_data(districts): return run_async(_load_merged_data(districts))
 def insert_registro(values_dict): return run_async(_insert_registro(values_dict))
 def get_monto_a_pagar(fecha_str, modalidad="Virtual"):
     async def _get_monto_a_pagar():
@@ -1173,21 +1207,27 @@ if st.session_state.page != "Inicio":
 if st.session_state.page == "Inicio":
     #st.markdown("### Bienvenidos al Sistema de Gestión Ministerial Prondamin 2026")
     #st.info("Seleccione una opción a continuación para continuar:")
-    st.image(os.path.join("assets", "enMantenimiento.png"), use_container_width=True)
-    #st.stop()
-#===========================================================================
-    if st.session_state.user_ctx is None:
-        if st.button("🔒 Admin Login", use_container_width=True):
-            navigate_to("Login")
+    st.image(os.path.join("assets", "noMolestar.png"), use_container_width=True)
+    
+    col_nav1, col_nav2 = st.columns(2)
+    with col_nav1:
+        if st.button("📜 Consultar Certificados", use_container_width=True):
+            navigate_to("ConsultaCertificados")
             st.rerun()
-    else:
-        if st.button("📊 Dashboard Admin", use_container_width=True):
-            navigate_to("Admin")
-            st.rerun()
-        if st.button("🚪 Cerrar Sesión", use_container_width=True):
-            st.session_state.user_ctx = None
-            navigate_to("Inicio")
-            st.rerun()
+    
+    with col_nav2:
+        if st.session_state.user_ctx is None:
+            if st.button("🔒 Admin Login", use_container_width=True):
+                navigate_to("Login")
+                st.rerun()
+        else:
+            if st.button("📊 Dashboard Admin", use_container_width=True):
+                navigate_to("Admin")
+                st.rerun()
+            if st.button("🚪 Cerrar Sesión", use_container_width=True):
+                st.session_state.user_ctx = None
+                navigate_to("Inicio")
+                st.rerun()
     
 
 #===========================================================================
@@ -1294,6 +1334,12 @@ elif st.session_state.page == "Admin":
                 
                 if is_global:
                     # SECCIÓN COMBINADA AL PRINCIPIO
+                    c1, c2 = st.columns([3, 1])
+                    c1.info(f"Panel Global cargado. Acceso Global.")
+                    if c2.button("🔄 Actualizar Datos", use_container_width=True):
+                        st.cache_data.clear()
+                        st.rerun()
+
                     with st.expander("📊 COMBINADO (Todos los Distritos)", expanded=True):
                         tab1, tab2, tab3 = st.tabs(["Estadísticas Globales", "Tabla Completa", "🏦 Movimientos DataBank"])
                         with tab1:
@@ -1311,8 +1357,8 @@ elif st.session_state.page == "Admin":
                             if is_global:
                                 st.markdown("---")
                                 st.markdown("#### 🔍 Auditoría de Datos (Registros en Base de Datos)")
-                                # Obtenemos data cruda de 2026 para comparar
-                                df_2026_raw = run_async(_get_df_from_turso("prondamin2026BB"))
+                                # Obtenemos data cruda de 2026 para comparar (Usando el cache!)
+                                df_2026_raw = get_df_from_turso("prondamin2026BB")
                                 total_db_2026 = len(df_2026_raw)
                                 # Registros que no coinciden con la lista oficial de DISTRITOS
                                 df_errores = df_2026_raw[~df_2026_raw['DISTRITO'].isin(st.session_state.DISTRITOS_LIST)]
@@ -1656,6 +1702,40 @@ elif st.session_state.page == "Registro":
     render_registration_form(prefix="reg", skip_password=False)
 
 
+
+# 5. CONSULTA DE CERTIFICADOS
+elif st.session_state.page == "ConsultaCertificados":
+    st.markdown("## Consultar Certificados 2022 - 2025")
+    st.info("Ingrese su número de cédula para buscar sus certificados históricos.")
+    
+    cedula = st.text_input("Ingrese su Cédula:", placeholder="Ej. 12345678").strip()
+    if st.button("Buscar Certificados", type="primary", use_container_width=True):
+        if cedula:
+            cedula_clean = ''.join(filter(str.isdigit, cedula))
+            res_turso25 = busca_en_turso_pronda25(cedula_clean)
+            if res_turso25:
+                st.success(f"Certificados encontrados para: {res_turso25.get('NOMBRES2025', res_turso25.get('NOMBRES', ''))} {res_turso25.get('APELLIDOS2025', res_turso25.get('APELLIDOS', ''))}")
+                with st.expander("Certificados Hallados", expanded=True):
+                    cols = st.columns(4)
+                    found = False
+                    for i, yr in enumerate(["2022", "2023", "2024", "2025"]):
+                        cert_val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}") or ""
+                        cert_url = str(cert_val).strip()
+                        if cert_url and cert_url not in ["nan", "None", ""]:
+                            found = True
+                            cert_url = dropbox_to_raw(cert_url)
+                            with cols[i]:
+                                st.write(f"**{yr}**")
+                                try:
+                                    st.image(cert_url, use_container_width=True)
+                                except:
+                                    st.markdown(f'<img src="{cert_url}" style="width:100%">', unsafe_allow_html=True)
+                    if not found:
+                        st.warning("No se encontraron certificados para los años 2022-2025.")
+            else:
+                st.error("Cédula no encontrada en el Padrón 2025.")
+        else:
+            st.warning("Por favor ingrese una cédula.")
 
 # Flujo de Navegación Inferior
 if st.session_state.page != "Inicio":
