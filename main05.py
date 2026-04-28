@@ -532,6 +532,7 @@ def style_user_table(styler):
     if 'Status' in df.columns:
         verificados = df['Status'] == 'Verificado'
         pendientes = df['Status'] == 'Pendiente'
+        devolver = df['Status'] == 'Verificado - Devolver dinero - está adelantando '
         
         # Optimizamos coloreando solo las columnas esenciales o toda la fila si es necesario
         # Para máxima velocidad en el navegador con 2000 filas, colorear menos columnas ayuda
@@ -539,6 +540,7 @@ def style_user_table(styler):
         for col in cols_to_style:
             styles.loc[verificados, col] = 'background-color: #E0FFE0; color: black;' # Verde claro
             styles.loc[pendientes, col] = 'background-color: #FFFFE0; color: black;'  # Amarillo claro
+            styles.loc[devolver, col] = 'background-color: #FFCDD2; color: black;' # Rojo suave
             
     return styler.apply(lambda _: styles, axis=None)
 
