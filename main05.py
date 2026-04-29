@@ -254,7 +254,8 @@ async def _get_databank_df():
                     d.*, 
                     p.NOMBRES, 
                     p.APELLIDOS, 
-                    p.DISTRITO, 
+                    p.DISTRITO,
+                    p.CATEGORIA, 
                     p.MONTO_PAGO, 
                     p.MONTO_A_PAGAR,
                     p.Status 
