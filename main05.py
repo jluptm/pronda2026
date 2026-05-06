@@ -2,6 +2,8 @@ import os
 import sys
 import asyncio
 import tempfile
+import cert_gen
+import gdrive_utils
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -47,6 +49,11 @@ R2_SECRET_KEY = get_secret("aws", "secret_key", "R2_SECRET_ACCESS_KEY")
 R2_ENDPOINT_URL = get_secret("aws", "endpoint_url", "R2_ENDPOINT_URL")
 R2_PUBLIC_URL = get_secret("aws", "public_url", "R2_PUBLIC_URL")
 R2_BUCKET_NAME = get_secret("aws", "bucket_name", "R2_BUCKET_NAME") or "prondamin-captures"
+
+# Google Drive Config
+GDRIVE_FOLDER_ID = get_secret("google_drive", "folder_id", "GDRIVE_FOLDER_ID")
+GDRIVE_CLIENT_SECRET = get_secret("google_drive", "client_secret_file", "GDRIVE_CLIENT_SECRET")
+GDRIVE_TOKEN_FILE = get_secret("google_drive", "token_file", "GDRIVE_TOKEN_FILE")
 
 # Listas Base
 CATEGORIAS_BASE = ["Ministro Ordenado", "Ministro Licenciado", "Ministro Cristiano", "Ministro Distrital"]
@@ -190,6 +197,17 @@ async def _check_and_create_databank_table():
         except Exception:
             pass
 
+async def _ensure_certif2026_column():
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        try:
+            res = await client.execute("SELECT * FROM prondamin2026BB LIMIT 1")
+            if 'certif2026' not in res.columns:
+                await client.execute("ALTER TABLE prondamin2026BB ADD COLUMN certif2026 TEXT")
+        except Exception:
+            pass
+
+def ensure_certif2026_column(): return run_async(_ensure_certif2026_column())
+
 async def _process_pagos_2026():
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
         # 1. Obtener registros de prondamin2026BB
@@ -285,6 +303,21 @@ async def _bulk_update_status_verificado(cedulas):
 
 def bulk_update_status_verificado(cedulas): return run_async(_bulk_update_status_verificado(cedulas))
 
+async def _bulk_update_cert_links_2026(links_dict):
+    if not links_dict: return 0
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        statements = []
+        for cedula, link in links_dict.items():
+            statements.append(libsql.Statement(
+                "UPDATE prondamin2026BB SET certif2026 = ? WHERE CEDULA = ?",
+                [link, cedula]
+            ))
+        if statements:
+            await client.batch(statements)
+        return len(statements)
+
+def bulk_update_cert_links_2026(links_dict): return run_async(_bulk_update_cert_links_2026(links_dict))
+
 async def _get_databank_keys():
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
         try:
@@ -345,7 +378,7 @@ def check_and_create_databank_table(): return run_async(_check_and_create_databa
 def insert_bank_data(df): return run_async(_insert_bank_data(df))
 
 async def _load_merged_data(districts):
-    common_cols = ['CEDULA', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'MODALIDAD', 'Status', 'REFERENCIA', 'CURSO_INSCRITO', '_source']
+    common_cols = ['CEDULA', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'EMAIL', 'TELEFONOS', 'MODALIDAD', 'Status', 'REFERENCIA', 'CURSO_INSCRITO', 'certif2026', '_source']
     
     df_2025 = await _get_df_from_turso("pronda_2025")
     if not df_2025.empty:
@@ -673,9 +706,27 @@ def get_monto_a_pagar(fecha_str, modalidad="Virtual"):
         return 0.0
     return run_async(_get_monto_a_pagar())
 
-def dropbox_to_raw(url: str) -> str:
-    if "dl=0" in url or "dl=1" in url: return url.replace("dl=0", "raw=1").replace("dl=1", "raw=1")
-    return url + "?raw=1" if url else ""
+def get_raw_url(url: str) -> str:
+    if not url or not isinstance(url, str): return ""
+    u = url.strip()
+    if u.lower() in ["nan", "none", "", "0", "-", "false"]: return ""
+    
+    if "dropbox.com" in u:
+        if "dl=0" in u or "dl=1" in u: return u.replace("dl=0", "raw=1").replace("dl=1", "raw=1")
+        return u + ("&" if "?" in u else "?") + "raw=1"
+        
+    if "drive.google.com" in u:
+        import re
+        match = re.search(r'/d/([a-zA-Z0-9_-]+)', u)
+        if not match:
+            match = re.search(r'id=([a-zA-Z0-9_-]+)', u)
+        
+        if match:
+            file_id = match.group(1)
+            # El formato thumbnail es más robusto para visualización incrustada
+            return f"https://drive.google.com/thumbnail?id={file_id}&sz=w1000"
+            
+    return u
 
 def render_registration_form(prefix="reg", skip_password=False):
     import datetime as dt
@@ -711,19 +762,30 @@ def render_registration_form(prefix="reg", skip_password=False):
         st.write(f"### Bienvenid@ {defaults.get('NOMBRES')} {defaults.get('APELLIDOS')}")
         
         with st.expander("Certificados Anteriores (Prondamin)", expanded=False):
+            res_26_cert = busca_en_turso_pronda26(cedula_input)
+            
+            certs_to_show = []
+            # 2022-2025
             if res_turso25:
-                cols = st.columns(4)
-                for i, yr in enumerate(["2022", "2023", "2024", "2025"]):
-                    cert_val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}") or ""
-                    cert_url = str(cert_val).strip()
-                    if cert_url and cert_url not in ["nan", "None", ""]:
-                        cert_url = dropbox_to_raw(cert_url)
-                        with cols[i]:
-                            st.write(f"**{yr}**")
-                            try:
-                                st.image(cert_url, use_container_width=True)
-                            except:
-                                st.markdown(f'<img src="{cert_url}" style="width:100%">', unsafe_allow_html=True)
+                for yr in ["2022", "2023", "2024", "2025"]:
+                    val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}")
+                    url = get_raw_url(str(val))
+                    if url: certs_to_show.append((yr, url, str(val)))
+            
+            # 2026
+            if isinstance(res_26_cert, pd.DataFrame) and not res_26_cert.empty:
+                c26 = next((c for c in res_26_cert.columns if c.lower() == 'certif2026'), None)
+                if c26:
+                    val = res_26_cert.iloc[0][c26]
+                    url = get_raw_url(str(val))
+                    if url: certs_to_show.append(("2026", url, str(val)))
+            
+            if certs_to_show:
+                cols = st.columns(len(certs_to_show))
+                for idx, (yr, img_url, orig_url) in enumerate(certs_to_show):
+                    with cols[idx]:
+                        st.write(f"**{yr}**")
+                        st.markdown(f'<a href="{orig_url}" target="_blank"><img src="{img_url}" style="width:100%; border-radius:5px;"></a>', unsafe_allow_html=True)
             else:
                 st.write("Sin certificados anteriores disponibles.")
                 
@@ -1306,6 +1368,9 @@ elif st.session_state.page == "Admin":
         st.markdown(f"## Tablero de Administración - {ctx.get('Nombres')}")
         st.write(f"Rol/Distritos: **{tipo_acceso}**")
         
+        # Garantizar que existe el campo certif2026
+        ensure_certif2026_column()
+        
         is_global = tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]
         
         # Botones de Acción (Global o con acceso Total -T)
@@ -1609,11 +1674,120 @@ elif st.session_state.page == "Admin":
                             st.write("No hay datos en Databank.")
 
                 # SECCIÓN MATRICULACIÓN ESPECIAL (Solo Admin)
-                if tipo_acceso.strip(" []").lower() in ["total", "financiero", "develop", "financiero"]:
+                if tipo_acceso.strip(" []").lower() in ["total", "financiero", "develop"]:
                     with st.expander("✨ Matriculación Especial", expanded=False):
                         st.markdown("### Registro Administrativo Directo")
                         st.info("Esta sección permite registrar pagos sin la validación de clave AdminF para el método 'Otro'.")
                         render_registration_form(prefix="spec", skip_password=True)
+
+                # SECCIÓN GENERACIÓN DE CERTIFICADOS 2026
+                if is_global or has_t_access:
+                    with st.expander("🎓 Generación de Certificados 2026", expanded=False):
+                        st.markdown("### Generador Masivo de Certificados")
+                        st.info("Suba un archivo Excel con las columnas: `cedula`, `nombres`, `apellidos`, `aprobado`, `categoria`.")
+                        
+                        cert_file = st.file_uploader("Subir Listado de Aprobados", type=["xlsx"], key="cert_file_up")
+                        
+                        if cert_file:
+                            try:
+                                df_cert_raw = pd.read_excel(cert_file)
+                                # Normalizar columnas para el cruce
+                                df_cert_raw.columns = [c.lower() for c in df_cert_raw.columns]
+                                
+                                if not all(c in df_cert_raw.columns for c in ['cedula', 'aprobado', 'categoria']):
+                                    st.error("El archivo debe contener las columnas 'cedula', 'aprobado' y 'categoria'.")
+                                else:
+                                    # Cruce con la base de datos prondamin2026BB (df_full ya está cargado arriba)
+                                    # Asegurar que cedula sea string para el merge
+                                    df_cert_raw['cedula'] = df_cert_raw['cedula'].astype(str).str.strip()
+                                    df_full['CED_STR'] = df_full['CEDULA'].astype(str).str.strip()
+                                    
+                                    # Tomamos Categoria del Excel, el resto del Padrón
+                                    df_merge = pd.merge(
+                                        df_cert_raw[['cedula', 'aprobado', 'categoria']], 
+                                        df_full[['CED_STR', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'Status']], 
+                                        left_on='cedula', right_on='CED_STR', how='left'
+                                    )
+                                    
+                                    # Columnas finales: [cedula, nombres, apellidos, distrito, categoria, status, aprobado]
+                                    df_display = df_merge[['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'categoria', 'Status', 'aprobado']].copy()
+                                    
+                                    # Renombramos para consistencia visual
+                                    df_display.columns = ['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'Status', 'aprobado']
+                                    
+                                    # Función de Estilizado
+                                    def style_certs(row):
+                                        styles = [''] * len(row)
+                                        if str(row['Status']) == 'Verificado':
+                                            styles = ['background-color: #d4edda'] * len(row) # Verde claro
+                                        if row['aprobado'] == False or str(row['aprobado']).lower() == 'false':
+                                            styles = ['background-color: #fff3cd'] * len(row) # Amarillo
+                                        return styles
+                                    
+                                    st.write(f"**Vista previa de emisión ({len(df_display)} registros):**")
+                                    st.dataframe(df_display.style.apply(style_certs, axis=1), use_container_width=True)
+                                    
+                                    if st.button("🚀 Generar Certificados", type="primary", use_container_width=True):
+                                        progress_bar = st.progress(0)
+                                        status_text = st.empty()
+                                        
+                                        success_count = 0
+                                        errors = []
+                                        
+                                        # Inicializar almacenamiento de links para publicación
+                                        st.session_state.cert_links_2026 = {}
+                                        
+                                        # Filtrar solo aprobados para generar
+                                        df_to_gen = df_display[df_display['aprobado'].astype(str).str.lower() == 'true']
+                                        
+                                        if df_to_gen.empty:
+                                            st.warning("No hay registros marcados como 'aprobado' para generar.")
+                                        else:
+                                            total = len(df_to_gen)
+                                            for idx, (index, row) in enumerate(df_to_gen.iterrows()):
+                                                status_text.text(f"Generando {idx+1}/{total}: {row['NOMBRES']}...")
+                                                path, err = cert_gen.generate_certificate(
+                                                    row['NOMBRES'], row['APELLIDOS'], row['cedula'], row['CATEGORIA']
+                                                )
+                                                if path:
+                                                    success_count += 1
+                                                    # Subir a Google Drive si está configurado
+                                                    if GDRIVE_FOLDER_ID and GDRIVE_CLIENT_SECRET and GDRIVE_TOKEN_FILE:
+                                                        link, gerr = gdrive_utils.upload_to_gdrive(path, GDRIVE_FOLDER_ID, GDRIVE_CLIENT_SECRET, GDRIVE_TOKEN_FILE)
+                                                        if link:
+                                                            st.session_state.cert_links_2026[row['cedula']] = link
+                                                            success_count += 1
+                                                        else:
+                                                            errors.append(f"Drive Error ({row['cedula']}): {gerr}")
+                                                    else:
+                                                        success_count += 1
+                                                progress_bar.progress((idx + 1) / total)
+                                            
+                                            status_text.text("¡Proceso completado!")
+                                            if success_count > 0:
+                                                msg = f"Se generaron {success_count} certificados exitosamente."
+                                                if GDRIVE_FOLDER_ID:
+                                                    msg += " También se respaldaron en Google Drive."
+                                                else:
+                                                    msg += " (Solo local en /certif)"
+                                                st.success(msg)
+                                            if errors:
+                                                with st.expander("Ver errores"):
+                                                    for e in errors: st.write(e)
+                                            st.balloons()
+
+                                    # Botón de Publicación (Solo si hay links generados)
+                                    if st.session_state.get("cert_links_2026"):
+                                        st.write("---")
+                                        st.info(f"Se han generado y subido {len(st.session_state.cert_links_2026)} certificados. Haga clic en **Publicar** para que los usuarios puedan verlos en su portal.")
+                                        if st.button("📢 Publicar Certificados", type="secondary", use_container_width=True):
+                                            with st.spinner("Publicando en base de datos..."):
+                                                updated = bulk_update_cert_links_2026(st.session_state.cert_links_2026)
+                                                st.success(f"✅ ¡Éxito! Se han publicado {updated} certificados correctamente.")
+                                                st.session_state.cert_links_2026 = {} # Limpiar después de publicar
+                                                st.balloons()
+                            except Exception as e:
+                                st.error(f"Error procesando el archivo: {e}")
 
 
 
@@ -1708,7 +1882,7 @@ elif st.session_state.page == "Registro":
 
 # 5. CONSULTA DE CERTIFICADOS
 elif st.session_state.page == "ConsultaCertificados":
-    st.markdown("## Consultar Certificados 2022 - 2025")
+    st.markdown("## Consultar Certificados 2022 - 2026")
     st.info("Ingrese su número de cédula para buscar sus certificados históricos.")
     
     cedula = st.text_input("Ingrese su Cédula:", placeholder="Ej. 12345678").strip()
@@ -1716,27 +1890,54 @@ elif st.session_state.page == "ConsultaCertificados":
         if cedula:
             cedula_clean = ''.join(filter(str.isdigit, cedula))
             res_turso25 = busca_en_turso_pronda25(cedula_clean)
+            
+            # Para 2026 intentamos búsqueda flexible (limpia y raw)
+            res_turso26 = busca_en_turso_pronda26(cedula_clean)
+            if not isinstance(res_turso26, pd.DataFrame) or res_turso26.empty:
+                res_turso26 = busca_en_turso_pronda26(cedula.strip())
+            
+            user_name = ""
             if res_turso25:
-                st.success(f"Certificados encontrados para: {res_turso25.get('NOMBRES2025', res_turso25.get('NOMBRES', ''))} {res_turso25.get('APELLIDOS2025', res_turso25.get('APELLIDOS', ''))}")
+                user_name = f"{res_turso25.get('NOMBRES2025', res_turso25.get('NOMBRES', ''))} {res_turso25.get('APELLIDOS2025', res_turso25.get('APELLIDOS', ''))}"
+            elif isinstance(res_turso26, pd.DataFrame) and not res_turso26.empty:
+                u26 = res_turso26.iloc[0]
+                user_name = f"{u26.get('NOMBRES')} {u26.get('APELLIDOS')}"
+
+            if user_name:
+                st.success(f"Certificados encontrados para: {user_name}")
                 with st.expander("Certificados Hallados", expanded=True):
-                    cols = st.columns(4)
-                    found = False
-                    for i, yr in enumerate(["2022", "2023", "2024", "2025"]):
-                        cert_val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}") or ""
-                        cert_url = str(cert_val).strip()
-                        if cert_url and cert_url not in ["nan", "None", ""]:
-                            found = True
-                            cert_url = dropbox_to_raw(cert_url)
-                            with cols[i]:
+                    certs_to_show = []
+                    # Recolectar 2022-2025
+                    for yr in ["2022", "2023", "2024", "2025"]:
+                        val = ""
+                        if res_turso25:
+                            val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}")
+                        url = get_raw_url(str(val))
+                        if url: certs_to_show.append((yr, url, str(val)))
+                    
+                    # Recolectar 2026
+                    if isinstance(res_turso26, pd.DataFrame) and not res_turso26.empty:
+                        c26 = next((c for c in res_turso26.columns if c.lower() == 'certif2026'), None)
+                        if c26:
+                            val = res_turso26.iloc[0][c26]
+                            url = get_raw_url(str(val))
+                            if url: certs_to_show.append(("2026", url, str(val)))
+                    
+                    if certs_to_show:
+                        cols = st.columns(len(certs_to_show))
+                        for idx, (yr, img_url, orig_url) in enumerate(certs_to_show):
+                            with cols[idx]:
                                 st.write(f"**{yr}**")
-                                try:
-                                    st.image(cert_url, use_container_width=True)
-                                except:
-                                    st.markdown(f'<img src="{cert_url}" style="width:100%">', unsafe_allow_html=True)
-                    if not found:
-                        st.warning("No se encontraron certificados para los años 2022-2025.")
+                                st.markdown(f'''
+                                    <a href="{orig_url}" target="_blank" style="text-decoration: none;">
+                                        <img src="{img_url}" style="width:100%; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                                        <div style="text-align: center; margin-top: 5px; font-size: 0.8em; color: #666;">Ver original 🔗</div>
+                                    </a>
+                                ''', unsafe_allow_html=True)
+                    else:
+                        st.warning("No se encontraron certificados registrados para esta cédula.")
             else:
-                st.error("Cédula no encontrada en el Padrón 2025.")
+                st.error("Cédula no encontrada en los registros.")
         else:
             st.warning("Por favor ingrese una cédula.")
 
