@@ -1715,17 +1715,36 @@ elif st.session_state.page == "Admin":
                                     # Renombramos para consistencia visual
                                     df_display.columns = ['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'Status', 'aprobado']
                                     
-                                    # Función de Estilizado
+                                    # Función de Estilizado de Alto Contraste
                                     def style_certs(row):
-                                        styles = [''] * len(row)
-                                        if str(row['Status']) == 'Verificado':
-                                            styles = ['background-color: #d4edda'] * len(row) # Verde claro
-                                        if row['aprobado'] == False or str(row['aprobado']).lower() == 'false':
-                                            styles = ['background-color: #fff3cd'] * len(row) # Amarillo
-                                        return styles
+                                        is_approved = str(row['aprobado']).lower() == 'true'
+                                        is_verified = str(row['Status']) == 'Verificado'
+                                        
+                                        # Combinación de Aprobado + Verificado para el color de fondo
+                                        if is_approved and is_verified:
+                                            bg = '#004d00' # Verde muy oscuro
+                                        elif is_approved:
+                                            bg = '#006400' # Verde oscuro
+                                        else:
+                                            bg = '#8B0000' # Rojo oscuro (No aprobado)
+                                            
+                                        return [f'background-color: {bg}; color: #FFFFFF; font-weight: bold; border: 1px solid #444'] * len(row)
                                     
                                     st.write(f"**Vista previa de emisión ({len(df_display)} registros):**")
-                                    st.dataframe(df_display.style.apply(style_certs, axis=1), use_container_width=True)
+                                    st.dataframe(
+                                        df_display.style.apply(style_certs, axis=1),
+                                        use_container_width=True,
+                                        height=450,
+                                        column_config={
+                                            "cedula": st.column_config.TextColumn("🆔 Cédula", width="medium"),
+                                            "NOMBRES": st.column_config.TextColumn("👤 Nombres", width="large"),
+                                            "APELLIDOS": st.column_config.TextColumn("👤 Apellidos", width="large"),
+                                            "DISTRITO": st.column_config.TextColumn("📍 Distrito", width="medium"),
+                                            "CATEGORIA": st.column_config.TextColumn("🎓 Categoría", width="medium"),
+                                            "Status": st.column_config.TextColumn("📊 Estado", width="small"),
+                                            "aprobado": st.column_config.TextColumn("✅ ¿Aprobado?", width="small"),
+                                        }
+                                    )
                                     
                                     if st.button("🚀 Generar Certificados", type="primary", use_container_width=True):
                                         progress_bar = st.progress(0)
@@ -1750,7 +1769,6 @@ elif st.session_state.page == "Admin":
                                                     row['NOMBRES'], row['APELLIDOS'], row['cedula'], row['CATEGORIA']
                                                 )
                                                 if path:
-                                                    success_count += 1
                                                     # Subir a Google Drive si está configurado
                                                     if GDRIVE_FOLDER_ID and GDRIVE_CLIENT_SECRET and GDRIVE_TOKEN_FILE:
                                                         link, gerr = gdrive_utils.upload_to_gdrive(path, GDRIVE_FOLDER_ID, GDRIVE_CLIENT_SECRET, GDRIVE_TOKEN_FILE)
