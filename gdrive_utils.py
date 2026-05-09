@@ -89,3 +89,27 @@ def upload_to_gdrive(file_path, folder_id, client_secret_file, token_file):
         
     except Exception as e:
         return None, str(e)
+
+def list_files_in_folder(folder_id, client_secret_file, token_file):
+    """
+    Lista los archivos dentro de una carpeta específica de Google Drive.
+    """
+    service, err = get_gdrive_service(client_secret_file, token_file)
+    if err:
+        return None, err
+    
+    try:
+        # Consultar archivos en la carpeta
+        query = f"'{folder_id}' in parents and trashed = false"
+        # Campos a recuperar: id, name
+        response = service.files().list(
+            q=query, 
+            spaces='drive', 
+            fields='files(id, name)',
+            pageSize=1000 # Ajustar si hay demasiados archivos
+        ).execute()
+        
+        return response.get('files', []), None
+        
+    except Exception as e:
+        return None, str(e)

@@ -11,6 +11,7 @@ import streamlit_antd_components as sac
 import libsql_client as libsql
 import boto3
 import altair as alt
+from whatsapp_sender import send_whatsapp_message_async
 
 try:
     import tomllib
@@ -208,6 +209,17 @@ async def _ensure_certif2026_column():
 
 def ensure_certif2026_column(): return run_async(_ensure_certif2026_column())
 
+async def _ensure_notificado_column():
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        try:
+            res = await client.execute("SELECT * FROM prondamin2026BB LIMIT 1")
+            if 'Notificado' not in res.columns:
+                await client.execute("ALTER TABLE prondamin2026BB ADD COLUMN Notificado INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+def ensure_notificado_column(): return run_async(_ensure_notificado_column())
+
 async def _process_pagos_2026():
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
         # 1. Obtener registros de prondamin2026BB
@@ -317,6 +329,23 @@ async def _bulk_update_cert_links_2026(links_dict):
         return len(statements)
 
 def bulk_update_cert_links_2026(links_dict): return run_async(_bulk_update_cert_links_2026(links_dict))
+
+async def _increment_notificado(cedula):
+    async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+        await client.execute("UPDATE prondamin2026BB SET Notificado = Notificado + 1 WHERE CEDULA = ?", [cedula])
+
+def increment_notificado(cedula): return run_async(_increment_notificado(cedula))
+
+def normalize_phone(phone):
+    if not phone: return ""
+    digits = "".join(filter(str.isdigit, str(phone)))
+    if len(digits) < 8 or len(digits) > 15: return ""
+    if digits.startswith("580"): digits = "58" + digits[3:]
+    elif digits.startswith("5490"): digits = "549" + digits[4:]
+    elif digits.startswith("0"): digits = digits[1:]
+    if len(digits) == 10 and digits.startswith(("414", "424", "412", "416", "426")):
+        digits = "58" + digits
+    return "+" + digits
 
 async def _get_databank_keys():
     async with libsql.create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN) as client:
@@ -569,8 +598,7 @@ def style_user_table(styler):
         devolver = df['Status'] == 'Verificado - Devolver dinero - está adelantando '
         
         # Optimizamos coloreando solo las columnas esenciales o toda la fila si es necesario
-        # Para máxima velocidad en el navegador con 2000 filas, colorear menos columnas ayuda
-        cols_to_style = df.columns # O puedes listar ['Status', 'CEDULA', 'NOMBRES', 'APELLIDOS']
+        cols_to_style = df.columns
         for col in cols_to_style:
             styles.loc[verificados, col] = 'background-color: #E0FFE0; color: black;' # Verde claro
             styles.loc[pendientes, col] = 'background-color: #FFFFE0; color: black;'  # Amarillo claro
@@ -601,12 +629,9 @@ def confirm_manual_verification(to_list):
     if c2.button("❌ No", use_container_width=True):
         st.rerun()
 
-    if c2.button("❌ No", use_container_width=True):
-        st.rerun()
-
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60)
 def busca_en_turso_pronda26(cedula): return run_async(_busca_en_turso_pronda26(cedula))
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60)
 def busca_en_turso_pronda25(cedula): return run_async(_busca_en_turso_pronda25(cedula))
 def login_admin(username, password): return run_async(_login_admin(username, password))
 def verifica_clave_admin_f(clave): return run_async(_verifica_clave_admin_f(clave))
@@ -749,8 +774,8 @@ def render_registration_form(prefix="reg", skip_password=False):
             defaults.update({
                 "NOMBRES": res_turso25.get('NOMBRES2025', res_turso25.get('NOMBRES', '')),
                 "APELLIDOS": res_turso25.get('APELLIDOS2025', res_turso25.get('APELLIDOS', '')),
-                "CATEGORIA": res_turso25.get('CATEGORIA2025', res_turso25.get('CATEGORIA', '')),
                 "DISTRITO": res_turso25.get('DISTRITO2025', res_turso25.get('DISTRITO', '')),
+                "CATEGORIA": res_turso25.get('CATEGORIA2025', res_turso25.get('CATEGORIA', '')),
                 "EMAIL": res_turso25.get('EMAIL2025', res_turso25.get('EMAIL', '')),
                 "TELEFONOS": res_turso25.get('TELEFONOS2025', res_turso25.get('TELEFONOS', ''))
             })
@@ -940,8 +965,6 @@ def render_registration_form(prefix="reg", skip_password=False):
                 error_dialog(errores)
             else:
                 with st.spinner("Subiendo datos..."):
-                    # Aqui iría la subida a R2 si hubiera archivo, pero el original lo maneja.
-                    # Simplifico para el upsert
                     fecha_str = fecha_pago.strftime("%d-%m-%Y") if fecha_pago else ""
                     values_dict = {
                         "CEDULA": cedula_input, "NOMBRES": nombres, "APELLIDOS": apellidos,
@@ -1042,7 +1065,6 @@ def admin_nuevo_usuario_dialog(allowed_districts=None):
     else:
         categoria = categoria_sel
         
-        
     # Filtrar distritos si hay restricción
     final_dist_list = [d for d in st.session_state.DISTRITOS_LIST if allowed_districts is None or d in allowed_districts]
     distrito = col4.selectbox("Distrito", final_dist_list, index=0)
@@ -1058,7 +1080,6 @@ def admin_nuevo_usuario_dialog(allowed_districts=None):
         else:
             with st.spinner("Registrando..."):
                 now_str = datetime.now().isoformat()
-                # Si se agregó una nueva categoría y no está en la lista, añadirla permanentemente
                 if categoria and categoria not in st.session_state.CATEGORIAS_LIST:
                     st.session_state.CATEGORIAS_LIST.append(categoria)
                 
@@ -1135,7 +1156,6 @@ def admin_manual_edit_dialog(allowed_districts=None):
             curr_cat = str(user_data.get('CATEGORIA', '')).strip()
             if curr_cat in ["", "nan", "None"]: curr_cat = "-"
             
-            # Asegurar que el actual esté en la lista
             if curr_cat not in st.session_state.CATEGORIAS_LIST:
                 st.session_state.CATEGORIAS_LIST.append(curr_cat)
             
@@ -1217,8 +1237,6 @@ def admin_manual_edit_dialog(allowed_districts=None):
                                       disabled=is_verified)
 
         if st.form_submit_button("💾 Guardar Cambios en Registro", type="primary", use_container_width=True):
-            # Guardar Todo
-            # Actualizar listas si hay algo nuevo
             if categoria and categoria != "➕ Nueva Categoría..." and categoria not in st.session_state.CATEGORIAS_LIST:
                 st.session_state.CATEGORIAS_LIST.append(categoria)
             if distrito and distrito not in st.session_state.DISTRITOS_LIST:
@@ -1245,7 +1263,7 @@ def admin_manual_edit_dialog(allowed_districts=None):
             except Exception as e:
                 st.error(f"Error al guardar: {e}")
 
-if st.session_state.page == "Admin": # Dummy place to keep it for decoration if needed, but st.dialog doesn't need placement
+if st.session_state.page == "Admin": 
     pass
 
 
@@ -1270,8 +1288,6 @@ if st.session_state.page != "Inicio":
 
 # 1. INIT PAGE
 if st.session_state.page == "Inicio":
-    #st.markdown("### Bienvenidos al Sistema de Gestión Ministerial Prondamin 2026")
-    #st.info("Seleccione una opción a continuación para continuar:")
     st.image(os.path.join("assets", "noMolestar.png"), use_container_width=True)
     
     col_nav1, col_nav2 = st.columns(2)
@@ -1295,27 +1311,6 @@ if st.session_state.page == "Inicio":
                 st.rerun()
     
 
-#===========================================================================
-
-    # col_nav1, col_nav2 = st.columns(2)
-    # with col_nav1:
-    #     if st.button("📋 Consulta y Registro", use_container_width=True, type="primary"):
-    #         navigate_to("Registro")
-    #         st.rerun()
-    # with col_nav2:
-    #     if st.session_state.user_ctx is None:
-    #         if st.button("🔒 Admin Login", use_container_width=True):
-    #             navigate_to("Login")
-    #             st.rerun()
-    #     else:
-    #         if st.button("📊 Dashboard Admin", use_container_width=True):
-    #             navigate_to("Admin")
-    #             st.rerun()
-    #         if st.button("🚪 Cerrar Sesión", use_container_width=True):
-    #             st.session_state.user_ctx = None
-    #             navigate_to("Inicio")
-    #             st.rerun()
-    
 # 2. LOGIN ADMIN
 elif st.session_state.page == "Login":
     st.markdown("## Acceso Administrativo")
@@ -1341,7 +1336,6 @@ elif st.session_state.page == "Admin":
     else:
         ctx = st.session_state.user_ctx
         tipo_acceso = ctx.get("TipoDeAcceso", "")
-        # Parseo del array de distritos desde el texto (ej: "[Andino, Central]")
         import ast
         try:
             admin_districts = [d.strip() for d in ast.literal_eval(tipo_acceso)] if tipo_acceso.startswith("[") else []
@@ -1368,15 +1362,13 @@ elif st.session_state.page == "Admin":
         st.markdown(f"## Tablero de Administración - {ctx.get('Nombres')}")
         st.write(f"Rol/Distritos: **{tipo_acceso}**")
         
-        # Garantizar que existe el campo certif2026
         ensure_certif2026_column()
+        ensure_notificado_column()
         
         is_global = tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]
         
-        # Botones de Acción (Global o con acceso Total -T)
         if (is_global or has_t_access) and tipo_acceso.strip(" []").lower() != "financiero":
             c_adm1, c_adm2 = st.columns(2)
-            # Pasamos los distritos permitidos si no es global
             allowed = total_privilege_districts if not is_global else None
             
             if c_adm1.button("➕ Nuevo Usuario (Padrón 2026)", use_container_width=True):
@@ -1388,7 +1380,6 @@ elif st.session_state.page == "Admin":
                 admin_manual_edit_dialog()
 
         if not admin_districts and not is_global:
-
             st.warning(f"No hay registros visibles para tu rol.")
         else:
             distritos_a_listar = st.session_state.DISTRITOS_LIST if is_global else admin_districts
@@ -1401,7 +1392,6 @@ elif st.session_state.page == "Admin":
                     st.info(f"Panel {tipo_acceso} cargado. Acceso {'Global' if is_global else 'Especial (T)'}.")
                 
                 if is_global:
-                    # SECCIÓN COMBINADA AL PRINCIPIO
                     c1, c2 = st.columns([3, 1])
                     c1.info(f"Panel Global cargado. Acceso Global.")
                     if c2.button("🔄 Actualizar Datos", use_container_width=True):
@@ -1411,7 +1401,6 @@ elif st.session_state.page == "Admin":
                     with st.expander("📊 COMBINADO (Todos los Distritos)", expanded=True):
                         tab1, tab2, tab3 = st.tabs(["Estadísticas Globales", "Tabla Completa", "🏦 Movimientos DataBank"])
                         with tab1:
-                            # Métricas Globales (Filtradas)
                             col_a, col_b, col_c = st.columns(3)
                             
                             p_pending = df_full['Status'].eq('Pendiente').sum()
@@ -1421,14 +1410,11 @@ elif st.session_state.page == "Admin":
                             col_b.metric("🟡 Inscritos Pendientes", p_pending)
                             col_c.metric("🟢 Inscritos Verificados", p_verified)
                             
-                            # Métricas de Calidad de Datos (Solo para acceso Total/Develop)
                             if is_global:
                                 st.markdown("---")
                                 st.markdown("#### 🔍 Auditoría de Datos (Registros en Base de Datos)")
-                                # Obtenemos data cruda de 2026 para comparar (Usando el cache!)
                                 df_2026_raw = get_df_from_turso("prondamin2026BB")
                                 total_db_2026 = len(df_2026_raw)
-                                # Registros que no coinciden con la lista oficial de DISTRITOS
                                 df_errores = df_2026_raw[~df_2026_raw['DISTRITO'].isin(st.session_state.DISTRITOS_LIST)]
                                 count_errores = len(df_errores)
                                 
@@ -1437,45 +1423,34 @@ elif st.session_state.page == "Admin":
                                 if count_errores > 0:
                                     col_q2.metric("Distritos por Corregir", count_errores, delta=f"-{count_errores} omitidos", delta_color="inverse")
                                     st.error(f"⚠️ Atención: Hay **{count_errores}** registros con nombres de distrito no reconocidos. Estos registros han sido excluidos de las estadísticas superiores.")
-                                    
-                                    # Mostrar tabla de registros con errores
                                     st.write("### 📋 Registros con Errores de Distrito (Para corregir en DB)")
                                     st.dataframe(df_errores[['NOMBRES', 'APELLIDOS', 'CEDULA', 'DISTRITO', 'TELEFONOS']], use_container_width=True)
-                                    
-                                    # Mostrar cuáles son los distritos erróneos
                                     dist_erroneos = df_errores['DISTRITO'].unique().tolist()
                                     st.write(f"Valores no válidos detectados en DB: **{', '.join(dist_erroneos)}**")
                                 else:
                                     col_q2.metric("Distritos por Corregir", 0)
                                     st.success("Toda la data de distritos coincide con la lista oficial.")
 
-                                # --- NUEVA AUDITORÍA DE PAGOS Y REFERENCIAS ---
                                 st.markdown("#### 💳 Auditoría de Pagos y Referencias (2026)")
-                                
-                                # Preparar datos numéricos para cálculo
                                 df_2026_raw['MP_N'] = pd.to_numeric(df_2026_raw['MONTO_PAGO'], errors='coerce').fillna(0)
                                 df_2026_raw['MA_N'] = pd.to_numeric(df_2026_raw['MONTO_A_PAGAR'], errors='coerce').fillna(0)
                                 df_2026_raw['R_STR'] = df_2026_raw['REFERENCIA'].astype(str).str.strip()
                                 
-                                # Condiciones
-                                c1 = df_2026_raw['R_STR'].isin(['', 'None', 'nan', '0']) # No existe
-                                c2 = df_2026_raw['R_STR'].apply(lambda x: len(x) < 6 and x not in ['', 'None', 'nan', '0']) # Corta
-                                c3 = df_2026_raw['MP_N'] == 0 # Monto 0
-                                c4 = (df_2026_raw['MP_N'] - df_2026_raw['MA_N']).abs() > 100 # Diferencia > 100
+                                c1_aud = df_2026_raw['R_STR'].isin(['', 'None', 'nan', '0'])
+                                c2_aud = df_2026_raw['R_STR'].apply(lambda x: len(x) < 6 and x not in ['', 'None', 'nan', '0'])
+                                c3_aud = df_2026_raw['MP_N'] == 0
+                                c4_aud = (df_2026_raw['MP_N'] - df_2026_raw['MA_N']).abs() > 100
                                 
-                                df_pago_err = df_2026_raw[c1 | c2 | c3 | c4].copy()
+                                df_pago_err = df_2026_raw[c1_aud | c2_aud | c3_aud | c4_aud].copy()
                                 
                                 if not df_pago_err.empty:
                                     st.warning(f"Se detectaron **{len(df_pago_err)}** registros con posibles inconsistencias en pagos o referencias.")
-                                    # Mostrar tabla detallada
                                     st.dataframe(df_pago_err[['NOMBRES', 'APELLIDOS', 'CEDULA', 'REFERENCIA', 'MONTO_PAGO', 'MONTO_A_PAGAR', 'DISTRITO']], use_container_width=True)
-                                    
-                                    # Resumen de motivos
                                     motivos = []
-                                    if c1.any(): motivos.append("Referencias Vacías")
-                                    if c2.any(): motivos.append("Referencias cortas (< 6 dígitos)")
-                                    if c3.any(): motivos.append("Monto Reportado es 0")
-                                    if c4.any(): motivos.append("Discrepancia de monto > 100")
+                                    if c1_aud.any(): motivos.append("Referencias Vacías")
+                                    if c2_aud.any(): motivos.append("Referencias cortas (< 6 dígitos)")
+                                    if c3_aud.any(): motivos.append("Monto Reportado es 0")
+                                    if c4_aud.any(): motivos.append("Discrepancia de monto > 100")
                                     st.info(f"Motivos detectados: {', '.join(motivos)}")
                                 else:
                                     st.success("No se detectaron inconsistencias críticas en los pagos de 2026.")
@@ -1490,9 +1465,7 @@ elif st.session_state.page == "Admin":
                             df_db_current = get_databank_df()
                             df_rendered = render_databank_table(df_db_current)
                             
-                            # Acción de Sincronización Manual
                             if df_rendered is not None and not df_rendered.empty:
-                                # Filtrar los que visualmente son Verificados (check verde) pero Status es Pendiente
                                 to_sync = df_rendered[
                                     (df_rendered['CEDULA-U'] != "No Asignado") & 
                                     (df_rendered['Verificado'] == "✅") &
@@ -1507,42 +1480,31 @@ elif st.session_state.page == "Admin":
                                         st.balloons()
                                         st.rerun()
                 
-                # SECCIÓN CARGA DE DATA BANCARIA (Solo para Total, Develop y Financiero)
+                # SECCIÓN CARGA DE DATA BANCARIA
                 if tipo_acceso.strip(" []").lower() in ["total", "develop", "financiero"]:
                     with st.expander("📂 Carga y proceso de data bancaria", expanded=False):
                         st.markdown("### Importar Movimientos Bancarios (.xlsx)")
-                        st.info("El archivo debe contener los datos a partir de la fila 9. Al subir, se mostrará una vista previa.")
+                        st.info("El archivo debe contener los datos a partir de la fila 9.")
                         
                         uploaded_xlsx = st.file_uploader("Subir archivo Excel", type=["xlsx"], key="bank_xlsx_uploader")
                         
                         if uploaded_xlsx:
                             try:
-                                # Guardar y mostrar vista previa inmediatamente
                                 if not os.path.exists("uploads"):
                                     os.makedirs("uploads")
-                                
-                                # Guardar archivo (opcional si ya se lee de memoria, pero lo mantengo por la solicitud previa)
                                 file_path = os.path.join("uploads", uploaded_xlsx.name)
                                 with open(file_path, "wb") as f:
                                     f.write(uploaded_xlsx.getbuffer())
                                 
-                                # Procesar Excel para Vista Previa
-                                # Header en fila 9 (skiprows=8)
                                 df_bank = pd.read_excel(uploaded_xlsx, sheet_name=0, skiprows=8)
-                                
-                                # Eliminar filas completamente vacías
                                 df_bank = df_bank.dropna(how='all').reset_index(drop=True)
                                 
-                                # Filtrar por Tipo=='NC' y Referencia!='0'
                                 if 'Tipo' in df_bank.columns and 'Referencia' in df_bank.columns:
                                     df_bank['Tipo'] = df_bank['Tipo'].astype(str).str.strip()
                                     df_bank['Referencia'] = df_bank['Referencia'].astype(str).str.strip()
-                                    # Quitar .0 si es float
                                     df_bank['Referencia'] = df_bank['Referencia'].apply(lambda x: x[:-2] if x.endswith(".0") else x)
-                                    
                                     df_bank = df_bank[(df_bank['Tipo'] == 'NC') & (df_bank['Referencia'] != '0')]
                                 
-                                # Filtrar columnas requeridas
                                 required_cols = ["Tipo", "Fecha", "Referencia", "Descripción", "Monto Bs."]
                                 missing = [c for c in required_cols if c not in df_bank.columns]
                                 
@@ -1551,102 +1513,77 @@ elif st.session_state.page == "Admin":
                                     st.write(f"**Vista Previa de Datos ({len(df_preview)} registros encontrados):**")
                                     st.dataframe(df_preview, use_container_width=True)
                                     
-                                    # BOTÓN DE PROCESO (Confirmación después de vista previa)
                                     if st.button("🚀 Confirmar Carga a DataBank", use_container_width=True, type="primary"):
                                         with st.status("Procesando movimientos bancarios...", expanded=True) as stats:
-                                            st.write("Asegurando tabla de destino y conectando...")
                                             check_and_create_databank_table()
-                                            
-                                            st.write(f"Preparando {len(df_preview)} registros para verificación...")
                                             added = insert_bank_data(df_preview)
-                                            
                                             if added > 0:
                                                 stats.update(label=f"¡Éxito! Se agregaron {added} nuevos registros.", state="complete", expanded=False)
                                                 st.success(f"Se procesaron {len(df_preview)} filas. {added} fueron nuevas.")
-                                                st.session_state.bank_import_success = True # Flag para mostrar el botón de cruce
+                                                st.session_state.bank_import_success = True
                                                 st.balloons()
                                             else:
                                                 stats.update(label="No se detectaron nuevos registros para agregar.", state="complete", expanded=False)
-                                                st.warning("Todos los registros ya existían en la base de datos (según Fecha, Referencia y Descripción).")
-                                                st.session_state.bank_import_success = True # También activar flag aquí para permitir cruce
+                                                st.warning("Todos los registros ya existían en la base de datos.")
+
+                                if st.session_state.get("bank_import_success"):
+                                    st.divider()
+                                    st.markdown("#### Tareas de Post-Procesamiento")
+                                    c_p1, c_p2 = st.columns(2)
+                                    if c_p1.button("🔄 Procesar pagos2026", use_container_width=True):
+                                        with st.spinner("Realizando cruce con prondamin2026BB..."):
+                                            assigned, total = process_pagos_2026()
+                                            st.success(f"Cruce completado: {assigned} de {total} registros vinculados.")
+                                            st.session_state.show_process_results = True
                                     
-                                    # MOSTRAR BOTONES DE CRUCE SI HUBO ÉXITO O FORZADO (Fuera de st.button para persistir)
-                                    if st.session_state.get("bank_import_success"):
+                                    if st.session_state.get("show_process_results"):
                                         st.divider()
-                                        st.markdown("#### Tareas de Post-Procesamiento")
-                                        c_p1, c_p2 = st.columns(2)
-                                        if c_p1.button("🔄 Procesar pagos2026", use_container_width=True):
-                                            with st.spinner("Realizando cruce con prondamin2026BB..."):
-                                                assigned, total = process_pagos_2026()
-                                                st.success(f"Cruce completado: {assigned} de {total} registros vinculados.")
-                                                st.session_state.show_process_results = True
-                                        
-                                        if st.session_state.get("show_process_results"):
-                                            st.divider()
-                                            st.markdown("### 📋 Resultados del Cruce (Tabla DataBank)")
-                                            df_results = render_databank_table(get_databank_df())
-                                            
-                                            if df_results is not None:
-                                                if st.button("🚀 registrar los Verificados", use_container_width=True, type="primary"):
-                                                    # Filtrar cedulas con Verificado == ✅ y Cedula-U != No Asignado
-                                                    to_verify = df_results[
-                                                        (df_results['CEDULA-U'] != "No Asignado") & 
-                                                        (df_results['Verificado'] == "✅")
-                                                    ]['CEDULA-U'].tolist()
-                                                    
-                                                    if to_verify:
-                                                        with st.spinner(f"Actualizando {len(to_verify)} usuarios..."):
-                                                            updated = bulk_update_status_verificado(to_verify)
-                                                            st.success(f"Se han actualizado {updated} usuarios a status 'Verificado'.")
-                                                            st.balloons()
-                                                            st.session_state.show_process_results = False
-                                                            # st.rerun() # Opcional para refrescar estadisticas inmediatamente
-                                                    else:
-                                                        st.warning("No se encontraron registros asignados con el sello ✅ para registrar.")
-                                        
-                                        if c_p2.button("🧹 Limpiar Estado de Carga", use_container_width=True):
-                                            st.session_state.bank_import_success = False
-                                            st.rerun()
-                                else:
-                                    st.error(f"El archivo no tiene las columnas requeridas: {missing}")
-                                    st.write("Columnas detectadas:", list(df_bank.columns))
-                                        
+                                        st.markdown("### 📋 Resultados del Cruce (Tabla DataBank)")
+                                        df_results = render_databank_table(get_databank_df())
+                                        if df_results is not None:
+                                            if st.button("🚀 registrar los Verificados", use_container_width=True, type="primary"):
+                                                to_verify = df_results[
+                                                    (df_results['CEDULA-U'] != "No Asignado") & 
+                                                    (df_results['Verificado'] == "✅")
+                                                ]['CEDULA-U'].tolist()
+                                                if to_verify:
+                                                    with st.spinner(f"Actualizando {len(to_verify)} usuarios..."):
+                                                        updated = bulk_update_status_verificado(to_verify)
+                                                        st.success(f"Se han actualizado {updated} usuarios a status 'Verificado'.")
+                                                        st.balloons()
+                                                        st.session_state.show_process_results = False
+                                                else:
+                                                    st.warning("No se encontraron registros asignados con el sello ✅ para registrar.")
+
+                                    if c_p2.button("🧹 Limpiar Estado de Carga", use_container_width=True):
+                                        st.session_state.bank_import_success = False
+                                        st.session_state.show_process_results = False
+                                        st.rerun()
+
                             except Exception as e:
                                 st.error(f"Error procesando el archivo: {e}")
-                                            
-                # SECCIÓN VERIFICACIÓN MANUAL (Total, Financiero, Develop)
+
+                # SECCIÓN VERIFICACIÓN MANUAL
                 if tipo_acceso.strip(" []").lower() in ["total", "financiero", "develop"]:
                     with st.expander("✅ Verificación Manual", expanded=False):
                         st.markdown("### Databank Verificación Manual")
-                        st.info("Aquí se muestran los registros que no pudieron ser verificados automáticamente (❌).")
-                        
                         df_db_raw = get_databank_df()
                         if not df_db_raw.empty:
-                            # Procesamiento mínimo para mostrar en el editor
                             df_m = df_db_raw.copy()
                             df_m['Monto'] = pd.to_numeric(df_m['Monto'], errors='coerce').fillna(0)
                             df_m['MONTO_A_PAGAR'] = pd.to_numeric(df_m['MONTO_A_PAGAR'], errors='coerce').fillna(0)
                             df_m['difReal'] = df_m['Monto'] - df_m['MONTO_A_PAGAR']
-                            
-                            # Un registro está verificado si la diferencia es <= 100 o si el Status ya es 'Verificado' en prondamin2026BB
                             df_m['Verificado_Check'] = df_m.apply(
-                                lambda row: abs(row['difReal']) <= 100 or str(row.get('Status', '')) == 'Verificado', 
-                                axis=1
+                                lambda row: abs(row['difReal']) <= 100 or str(row.get('Status', '')) == 'Verificado', axis=1
                             )
-                            
-                            # Filtrar solo los NO verificados y que tengan CEDULA-U asignada
                             df_to_edit = df_m[(df_m['Verificado_Check'] == False) & (df_m['CEDULA-U'] != "No Asignado")].copy()
-                            
                             if not df_to_edit.empty:
-                                df_to_edit['Manual'] = False  # Columna para el checkbox
-                                
-                                # Columnas a mostrar
+                                df_to_edit['Manual'] = False
                                 cols_show = ['NOMBRES', 'APELLIDOS', 'CEDULA-U', 'DISTRITO', 'Fecha', 'Referencia', 'Monto', 'MONTO_A_PAGAR', 'difReal', 'Manual']
-                                
                                 edited_df = st.data_editor(
                                     df_to_edit[cols_show],
                                     column_config={
-                                        "Manual": st.column_config.CheckboxColumn("Seleccionar", help="Marque para verificar manualmente"),
+                                        "Manual": st.column_config.CheckboxColumn("Seleccionar"),
                                         "NOMBRES": st.column_config.Column(disabled=True),
                                         "APELLIDOS": st.column_config.Column(disabled=True),
                                         "CEDULA-U": st.column_config.Column(disabled=True),
@@ -1657,11 +1594,8 @@ elif st.session_state.page == "Admin":
                                         "MONTO_A_PAGAR": st.column_config.Column(disabled=True),
                                         "difReal": st.column_config.Column(disabled=True),
                                     },
-                                    hide_index=True,
-                                    use_container_width=True,
-                                    key="editor_manual"
+                                    hide_index=True, use_container_width=True, key="editor_manual"
                                 )
-                                
                                 if st.button("🚀 Cambio Manual a Verificado", use_container_width=True, type="primary"):
                                     to_verify = edited_df[edited_df['Manual'] == True]
                                     if not to_verify.empty:
@@ -1669,144 +1603,175 @@ elif st.session_state.page == "Admin":
                                     else:
                                         st.warning("No ha seleccionado ningún registro.")
                             else:
-                                st.success("No hay registros pendientes de verificación manual con cédula asignada.")
+                                st.success("No hay registros pendientes de verificación manual.")
                         else:
                             st.write("No hay datos en Databank.")
 
-                # SECCIÓN MATRICULACIÓN ESPECIAL (Solo Admin)
+                # SECCIÓN MATRICULACIÓN ESPECIAL
                 if tipo_acceso.strip(" []").lower() in ["total", "financiero", "develop"]:
                     with st.expander("✨ Matriculación Especial", expanded=False):
                         st.markdown("### Registro Administrativo Directo")
-                        st.info("Esta sección permite registrar pagos sin la validación de clave AdminF para el método 'Otro'.")
                         render_registration_form(prefix="spec", skip_password=True)
 
                 # SECCIÓN GENERACIÓN DE CERTIFICADOS 2026
                 if is_global or has_t_access:
                     with st.expander("🎓 Generación de Certificados 2026", expanded=False):
                         st.markdown("### Generador Masivo de Certificados")
-                        st.info("Suba un archivo Excel con las columnas: `cedula`, `nombres`, `apellidos`, `aprobado`, `categoria`.")
-                        
                         cert_file = st.file_uploader("Subir Listado de Aprobados", type=["xlsx"], key="cert_file_up")
-                        
                         if cert_file:
                             try:
                                 df_cert_raw = pd.read_excel(cert_file)
-                                # Normalizar columnas para el cruce
                                 df_cert_raw.columns = [c.lower() for c in df_cert_raw.columns]
-                                
                                 if not all(c in df_cert_raw.columns for c in ['cedula', 'aprobado', 'categoria']):
                                     st.error("El archivo debe contener las columnas 'cedula', 'aprobado' y 'categoria'.")
                                 else:
-                                    # Cruce con la base de datos prondamin2026BB (df_full ya está cargado arriba)
-                                    # Asegurar que cedula sea string para el merge
                                     df_cert_raw['cedula'] = df_cert_raw['cedula'].astype(str).str.strip()
                                     df_full['CED_STR'] = df_full['CEDULA'].astype(str).str.strip()
-                                    
-                                    # Tomamos Categoria del Excel, el resto del Padrón
                                     df_merge = pd.merge(
                                         df_cert_raw[['cedula', 'aprobado', 'categoria']], 
                                         df_full[['CED_STR', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'Status']], 
                                         left_on='cedula', right_on='CED_STR', how='left'
                                     )
-                                    
-                                    # Columnas finales: [cedula, nombres, apellidos, distrito, categoria, status, aprobado]
                                     df_display = df_merge[['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'categoria', 'Status', 'aprobado']].copy()
-                                    
-                                    # Renombramos para consistencia visual
                                     df_display.columns = ['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'Status', 'aprobado']
                                     
-                                    # Función de Estilizado de Alto Contraste
                                     def style_certs(row):
                                         is_approved = str(row['aprobado']).lower() == 'true'
                                         is_verified = str(row['Status']) == 'Verificado'
-                                        
-                                        # Combinación de Aprobado + Verificado para el color de fondo
-                                        if is_approved and is_verified:
-                                            bg = '#004d00' # Verde muy oscuro
-                                        elif is_approved:
-                                            bg = '#006400' # Verde oscuro
-                                        else:
-                                            bg = '#8B0000' # Rojo oscuro (No aprobado)
-                                            
+                                        if is_approved and is_verified: bg = '#004d00'
+                                        elif is_approved: bg = '#006400'
+                                        else: bg = '#8B0000'
                                         return [f'background-color: {bg}; color: #FFFFFF; font-weight: bold; border: 1px solid #444'] * len(row)
                                     
                                     st.write(f"**Vista previa de emisión ({len(df_display)} registros):**")
-                                    st.dataframe(
-                                        df_display.style.apply(style_certs, axis=1),
-                                        use_container_width=True,
-                                        height=450,
-                                        column_config={
-                                            "cedula": st.column_config.TextColumn("🆔 Cédula", width="medium"),
-                                            "NOMBRES": st.column_config.TextColumn("👤 Nombres", width="large"),
-                                            "APELLIDOS": st.column_config.TextColumn("👤 Apellidos", width="large"),
-                                            "DISTRITO": st.column_config.TextColumn("📍 Distrito", width="medium"),
-                                            "CATEGORIA": st.column_config.TextColumn("🎓 Categoría", width="medium"),
-                                            "Status": st.column_config.TextColumn("📊 Estado", width="small"),
-                                            "aprobado": st.column_config.TextColumn("✅ ¿Aprobado?", width="small"),
-                                        }
-                                    )
+                                    st.dataframe(df_display.style.apply(style_certs, axis=1), use_container_width=True, height=450)
                                     
                                     if st.button("🚀 Generar Certificados", type="primary", use_container_width=True):
                                         progress_bar = st.progress(0)
                                         status_text = st.empty()
-                                        
                                         success_count = 0
                                         errors = []
-                                        
-                                        # Inicializar almacenamiento de links para publicación
                                         st.session_state.cert_links_2026 = {}
-                                        
-                                        # Filtrar solo aprobados para generar
                                         df_to_gen = df_display[df_display['aprobado'].astype(str).str.lower() == 'true']
-                                        
                                         if df_to_gen.empty:
-                                            st.warning("No hay registros marcados como 'aprobado' para generar.")
+                                            st.warning("No hay registros marcados como 'aprobado'.")
                                         else:
                                             total = len(df_to_gen)
                                             for idx, (index, row) in enumerate(df_to_gen.iterrows()):
                                                 status_text.text(f"Generando {idx+1}/{total}: {row['NOMBRES']}...")
-                                                path, err = cert_gen.generate_certificate(
-                                                    row['NOMBRES'], row['APELLIDOS'], row['cedula'], row['CATEGORIA']
-                                                )
+                                                path, err = cert_gen.generate_certificate(row['NOMBRES'], row['APELLIDOS'], row['cedula'], row['CATEGORIA'])
                                                 if path:
-                                                    # Subir a Google Drive si está configurado
                                                     if GDRIVE_FOLDER_ID and GDRIVE_CLIENT_SECRET and GDRIVE_TOKEN_FILE:
                                                         link, gerr = gdrive_utils.upload_to_gdrive(path, GDRIVE_FOLDER_ID, GDRIVE_CLIENT_SECRET, GDRIVE_TOKEN_FILE)
                                                         if link:
                                                             st.session_state.cert_links_2026[row['cedula']] = link
                                                             success_count += 1
-                                                        else:
-                                                            errors.append(f"Drive Error ({row['cedula']}): {gerr}")
-                                                    else:
-                                                        success_count += 1
+                                                        else: errors.append(f"Drive Error ({row['cedula']}): {gerr}")
+                                                    else: success_count += 1
                                                 progress_bar.progress((idx + 1) / total)
-                                            
                                             status_text.text("¡Proceso completado!")
-                                            if success_count > 0:
-                                                msg = f"Se generaron {success_count} certificados exitosamente."
-                                                if GDRIVE_FOLDER_ID:
-                                                    msg += " También se respaldaron en Google Drive."
-                                                else:
-                                                    msg += " (Solo local en /certif)"
-                                                st.success(msg)
+                                            if success_count > 0: st.success(f"Se generaron {success_count} certificados.")
                                             if errors:
                                                 with st.expander("Ver errores"):
                                                     for e in errors: st.write(e)
                                             st.balloons()
-
-                                    # Botón de Publicación (Solo si hay links generados)
                                     if st.session_state.get("cert_links_2026"):
                                         st.write("---")
-                                        st.info(f"Se han generado y subido {len(st.session_state.cert_links_2026)} certificados. Haga clic en **Publicar** para que los usuarios puedan verlos en su portal.")
                                         if st.button("📢 Publicar Certificados", type="secondary", use_container_width=True):
-                                            with st.spinner("Publicando en base de datos..."):
+                                            with st.spinner("Publicando..."):
                                                 updated = bulk_update_cert_links_2026(st.session_state.cert_links_2026)
-                                                st.success(f"✅ ¡Éxito! Se han publicado {updated} certificados correctamente.")
-                                                st.session_state.cert_links_2026 = {} # Limpiar después de publicar
+                                                st.success(f"✅ ¡Éxito! Se han publicado {updated} certificados.")
+                                                st.session_state.cert_links_2026 = {}
                                                 st.balloons()
                             except Exception as e:
-                                st.error(f"Error procesando el archivo: {e}")
+                                st.error(f"Error: {e}")
 
+                # SECCIÓN NOTIFICACIONES WHATSAPP 2026
+                if is_global or has_t_access:
+                    with st.expander("🔔 Notificaciones WhatsApp 2026", expanded=False):
+                        st.markdown("### Control de Notificaciones Masivas")
+                        st.info("Este proceso buscará los certificados en Drive y notificará a los usuarios que aún no hayan recibido el máximo de 3 avisos.")
+                        col_n1, col_n2 = st.columns(2)
+                        
+                        if col_n1.button("🔍 Phase 1: Analizar Certificados en Drive", use_container_width=True):
+                            with st.spinner("Escaneando Drive..."):
+                                files, err = gdrive_utils.list_files_in_folder(GDRIVE_FOLDER_ID, GDRIVE_CLIENT_SECRET, GDRIVE_TOKEN_FILE)
+                                if err: st.error(f"Error Drive: {err}")
+                                elif not files: st.warning("No se encontraron certificados.")
+                                else:
+                                    df_db = get_df_from_turso("prondamin2026BB")
+                                    df_db['CEDULA'] = df_db['CEDULA'].astype(str).str.strip()
+                                    pending_data = []
+                                    for f in files:
+                                        fname = f['name']
+                                        cedula_f = None
+                                        if "." in fname:
+                                            name_part = fname.rsplit(".", 1)[0]
+                                            if "_" in name_part: cedula_f = name_part.split("_")[-1].strip()
+                                        if cedula_f:
+                                            user_row = df_db[df_db['CEDULA'] == cedula_f]
+                                            if not user_row.empty:
+                                                user = user_row.iloc[0]
+                                                notif_val = user.get('Notificado', 0)
+                                                if notif_val < 3:
+                                                    pending_data.append({
+                                                        "cedula": cedula_f, "nombre": f"{user['NOMBRES']} {user['APELLIDOS']}",
+                                                        "telefonos": str(user.get('TELEFONOS', '')), "notificaciones": notif_val, "archivo": fname
+                                                    })
+                                    if pending_data:
+                                        st.session_state.notif_pending_list = pending_data
+                                        st.success(f"Se encontraron {len(pending_data)} usuarios pendientes.")
+                                    else:
+                                        st.session_state.notif_pending_list = []
+                                        st.info("No hay usuarios pendientes.")
+
+                        if st.session_state.get("notif_pending_list"):
+                            st.write("#### Usuarios a Notificar:")
+                            df_pending = pd.DataFrame(st.session_state.notif_pending_list)
+                            st.dataframe(df_pending[['cedula', 'nombre', 'telefonos', 'notificaciones']], use_container_width=True)
+                            
+                            if st.button("🚀 Phase 2: Iniciar Envío Masivo (Intervalo 10s)", type="primary", use_container_width=True):
+                                wasender_key = get_secret("wasender", "API_KEY", "WASENDER_API_KEY")
+                                if not wasender_key: st.error("No se encontró API KEY.")
+                                else:
+                                    progress_bar = st.progress(0)
+                                    status_text = st.empty()
+                                    total = len(st.session_state.notif_pending_list)
+                                    success_count = 0
+                                    for idx, item in enumerate(st.session_state.notif_pending_list):
+                                        nombre, cedula, telefonos = item['nombre'], item['cedula'], item['telefonos']
+                                        status_text.info(f"[{idx+1}/{total}] Procesando a {nombre}...")
+                                        msg = (f"Buenos días ✨ {nombre} 🤗Bendiciones. \n\n"
+                                               f"Desde la dirección del ⭐ _Ministerio de Educación Cristiana_ ⭐ *MINEC* de las _*Asambleas de Dios*_, "
+                                               f"queremos 🥳felicitarte🎉 por tu participación en los cursos 📝*PRONDAMIN2026*✔️ \n\n"
+                                               f"Tu certificado📜 ya está disponible en👉 https://dub.sh/prondamin2026.")
+                                        import re
+                                        phone_list = [p.strip() for p in re.split(r'[,\s/]+', telefonos) if p.strip()]
+                                        sent_to_user = False
+                                        for p in phone_list:
+                                            p_norm = normalize_phone(p)
+                                            if p_norm:
+                                                status_text.text(f"🚀 Enviando a {nombre} al número {p_norm}...")
+                                                success = run_async(send_whatsapp_message_async(p_norm, msg, api_key=wasender_key))
+                                                if success:
+                                                    sent_to_user = True
+                                                    import time
+                                                    time.sleep(10)
+                                                else: st.error(f"Error enviando a {p_norm}")
+                                        if sent_to_user:
+                                            increment_notificado(cedula)
+                                            success_count += 1
+                                        progress_bar.progress((idx + 1) / total)
+                                    status_text.success(f"¡Proceso completado! Se notificaron {success_count} usuarios.")
+                                    st.session_state.notif_pending_list = []
+                                    st.balloons()
+                                    import time
+                                    time.sleep(2)
+                                    st.rerun()
+
+                        if col_n2.button("🧹 Limpiar Análisis", use_container_width=True):
+                            st.session_state.notif_pending_list = []
+                            st.rerun()
 
 
                 # LISTADO POR DISTRITO
@@ -1822,14 +1787,11 @@ elif st.session_state.page == "Admin":
                             
                         with tab1:
                             col_a, col_b, col_c = st.columns(3)
-                            
                             d_pending = dist_df['Status'].eq('Pendiente').sum()
                             d_verified = dist_df['Status'].eq('Verificado').sum()
-                            
                             col_a.metric("Total Padrón 2025", len(dist_df))
                             col_b.metric("🟡 Pendientes", d_pending)
                             col_c.metric("🟢 Verificados", d_verified)
-                            
                             st.write("---")
                             render_admin_charts(dist_df)
                             
@@ -1845,75 +1807,57 @@ elif st.session_state.page == "Admin":
                                 st.write(f"### ✏️ Editar Usuario de Distrito: {dist}")
                                 user_list = [f"{r['NOMBRES']} {r['APELLIDOS']} ({r['CEDULA']})" for _, r in dist_df.iterrows()]
                                 selected_label = st.selectbox("Seleccione el usuario a editar:", options=user_list, key=f"edit_sel_{dist}")
-                                
                                 if selected_label:
                                     ced_to_edit = selected_label.split("(")[-1].strip(")")
                                     user_to_edit = dist_df[dist_df['CEDULA'] == ced_to_edit].iloc[0]
-                                    
-                                    # Formulario sin usar st.form para permitir inputs dinámicos si se requiere, 
-                                    # pero st.form es mejor para botones de guardado aislados
                                     with st.form(key=f"form_edit_{ced_to_edit}_{dist}"):
                                         st.write(f"Editando Cédula: **{ced_to_edit}**")
                                         e_nombres = st.text_input("Nombres", value=str(user_to_edit.get('NOMBRES', '')))
                                         e_apellidos = st.text_input("Apellidos", value=str(user_to_edit.get('APELLIDOS', '')))
-                                        
                                         cat_val = str(user_to_edit.get('CATEGORIA', '')).strip()
                                         if cat_val in ["", "nan", "None"]: cat_val = "-"
-                                        
-                                        if cat_val not in st.session_state.CATEGORIAS_LIST:
-                                            st.session_state.CATEGORIAS_LIST.append(cat_val)
-                                            
+                                        if cat_val not in st.session_state.CATEGORIAS_LIST: st.session_state.CATEGORIAS_LIST.append(cat_val)
                                         e_cat_options = st.session_state.CATEGORIAS_LIST + ["➕ Nueva Categoría..."]
                                         e_cat_idx = st.session_state.CATEGORIAS_LIST.index(cat_val)
                                         e_cat_sel = st.selectbox("Categoría", e_cat_options, index=e_cat_idx)
-                                        
                                         if e_cat_sel == "➕ Nueva Categoría...":
                                             e_nueva_cat = st.text_input("Nombre de la Nueva Categoría", key=f"new_cat_{ced_to_edit}")
                                             e_categoria = e_nueva_cat.strip()
-                                        else:
-                                            e_categoria = e_cat_sel
-                                        
+                                        else: e_categoria = e_cat_sel
                                         e_email = st.text_input("Correos", value=str(user_to_edit.get('EMAIL', '')))
                                         e_telefonos = st.text_input("Teléfonos", value=str(user_to_edit.get('TELEFONOS', '')))
-                                        
                                         st.info(f"Distrito fijo: {dist}")
-                                        
                                         submit_edit = st.form_submit_button("Guardar Cambios", type="primary", use_container_width=True)
-                                        
                                         if submit_edit:
-                                                # Actualizar lista de categorías si es nueva
                                                 if e_categoria and e_categoria != "➕ Nueva Categoría..." and e_categoria not in st.session_state.CATEGORIAS_LIST:
                                                     st.session_state.CATEGORIAS_LIST.append(e_categoria)
-                                                
                                                 res_msg = upsert_user_info(ced_to_edit, e_nombres, e_apellidos, e_categoria, e_email, e_telefonos, dist)
                                                 st.success(f"Usuario {e_nombres} {e_apellidos} {res_msg} correctamente.")
                                                 st.balloons()
-                                                # st.rerun() # Opcional, dependiendo de si queremos refrescar todo el panel
 
 # 4. REGISTRO Y CONSULTA
 elif st.session_state.page == "Registro":
     st.markdown("## Consulta y Registro 2026")
-    
     render_registration_form(prefix="reg", skip_password=False)
-
-
 
 # 5. CONSULTA DE CERTIFICADOS
 elif st.session_state.page == "ConsultaCertificados":
     st.markdown("## Consultar Certificados 2022 - 2026")
     st.info("Ingrese su número de cédula para buscar sus certificados históricos.")
     
-    cedula = st.text_input("Ingrese su Cédula:", placeholder="Ej. 12345678").strip()
+    col_s1, col_s2 = st.columns([4, 1])
+    cedula = col_s1.text_input("Ingrese su Cédula:", placeholder="Ej. 12345678", label_visibility="collapsed").strip()
+    if col_s2.button("🔄 Refrescar", use_container_width=True, help="Limpiar caché y forzar actualización de datos"):
+        st.cache_data.clear()
+        st.rerun()
+
     if st.button("Buscar Certificados", type="primary", use_container_width=True):
         if cedula:
             cedula_clean = ''.join(filter(str.isdigit, cedula))
             res_turso25 = busca_en_turso_pronda25(cedula_clean)
-            
-            # Para 2026 intentamos búsqueda flexible (limpia y raw)
             res_turso26 = busca_en_turso_pronda26(cedula_clean)
             if not isinstance(res_turso26, pd.DataFrame) or res_turso26.empty:
                 res_turso26 = busca_en_turso_pronda26(cedula.strip())
-            
             user_name = ""
             if res_turso25:
                 user_name = f"{res_turso25.get('NOMBRES2025', res_turso25.get('NOMBRES', ''))} {res_turso25.get('APELLIDOS2025', res_turso25.get('APELLIDOS', ''))}"
@@ -1925,22 +1869,17 @@ elif st.session_state.page == "ConsultaCertificados":
                 st.success(f"Certificados encontrados para: {user_name}")
                 with st.expander("Certificados Hallados", expanded=True):
                     certs_to_show = []
-                    # Recolectar 2022-2025
                     for yr in ["2022", "2023", "2024", "2025"]:
                         val = ""
-                        if res_turso25:
-                            val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}")
+                        if res_turso25: val = res_turso25.get(f"certificado{yr}") or res_turso25.get(f"CERTIFICADO{yr}")
                         url = get_raw_url(str(val))
                         if url: certs_to_show.append((yr, url, str(val)))
-                    
-                    # Recolectar 2026
                     if isinstance(res_turso26, pd.DataFrame) and not res_turso26.empty:
                         c26 = next((c for c in res_turso26.columns if c.lower() == 'certif2026'), None)
                         if c26:
                             val = res_turso26.iloc[0][c26]
                             url = get_raw_url(str(val))
                             if url: certs_to_show.append(("2026", url, str(val)))
-                    
                     if certs_to_show:
                         cols = st.columns(len(certs_to_show))
                         for idx, (yr, img_url, orig_url) in enumerate(certs_to_show):
@@ -1952,14 +1891,10 @@ elif st.session_state.page == "ConsultaCertificados":
                                         <div style="text-align: center; margin-top: 5px; font-size: 0.8em; color: #666;">Ver original 🔗</div>
                                     </a>
                                 ''', unsafe_allow_html=True)
-                    else:
-                        st.warning("No se encontraron certificados registrados para esta cédula.")
-            else:
-                st.error("Cédula no encontrada en los registros.")
-        else:
-            st.warning("Por favor ingrese una cédula.")
+                    else: st.warning("No se encontraron certificados registrados.")
+            else: st.error("Cédula no encontrada en los registros.")
+        else: st.warning("Por favor ingrese una cédula.")
 
-# Flujo de Navegación Inferior
 if st.session_state.page != "Inicio":
     st.write("---")
     if st.button("← Volver al Inicio", key="btn_volver_abajo"):
