@@ -1622,18 +1622,18 @@ elif st.session_state.page == "Admin":
                             try:
                                 df_cert_raw = pd.read_excel(cert_file)
                                 df_cert_raw.columns = [c.lower() for c in df_cert_raw.columns]
-                                if not all(c in df_cert_raw.columns for c in ['cedula', 'aprobado', 'categoria']):
-                                    st.error("El archivo debe contener las columnas 'cedula', 'aprobado' y 'categoria'.")
+                                if not all(c in df_cert_raw.columns for c in ['cedula', 'aprobado', 'categoria', 'modalidad']):
+                                    st.error("El archivo debe contener las columnas 'cedula', 'aprobado', 'categoria' y 'modalidad'.")
                                 else:
                                     df_cert_raw['cedula'] = df_cert_raw['cedula'].astype(str).str.strip()
                                     df_full['CED_STR'] = df_full['CEDULA'].astype(str).str.strip()
                                     df_merge = pd.merge(
-                                        df_cert_raw[['cedula', 'aprobado', 'categoria']], 
+                                        df_cert_raw[['cedula', 'aprobado', 'categoria', 'modalidad']], 
                                         df_full[['CED_STR', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'Status']], 
                                         left_on='cedula', right_on='CED_STR', how='left'
                                     )
-                                    df_display = df_merge[['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'categoria', 'Status', 'aprobado']].copy()
-                                    df_display.columns = ['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'Status', 'aprobado']
+                                    df_display = df_merge[['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'categoria', 'Status', 'aprobado', 'modalidad']].copy()
+                                    df_display.columns = ['cedula', 'NOMBRES', 'APELLIDOS', 'DISTRITO', 'CATEGORIA', 'Status', 'aprobado', 'MODALIDAD']
                                     
                                     def style_certs(row):
                                         is_approved = str(row['aprobado']).lower() == 'true'
@@ -1659,7 +1659,7 @@ elif st.session_state.page == "Admin":
                                             total = len(df_to_gen)
                                             for idx, (index, row) in enumerate(df_to_gen.iterrows()):
                                                 status_text.text(f"Generando {idx+1}/{total}: {row['NOMBRES']}...")
-                                                path, err = cert_gen.generate_certificate(row['NOMBRES'], row['APELLIDOS'], row['cedula'], row['CATEGORIA'])
+                                                path, err = cert_gen.generate_certificate(row['NOMBRES'], row['APELLIDOS'], row['cedula'], row['CATEGORIA'], row['MODALIDAD'])
                                                 if path:
                                                     if GDRIVE_FOLDER_ID and GDRIVE_CLIENT_SECRET and GDRIVE_TOKEN_FILE:
                                                         link, gerr = gdrive_utils.upload_to_gdrive(path, GDRIVE_FOLDER_ID, GDRIVE_CLIENT_SECRET, GDRIVE_TOKEN_FILE)
