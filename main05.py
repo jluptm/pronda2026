@@ -1293,7 +1293,7 @@ if st.session_state.page == "Inicio":
     col_nav1, col_nav2 = st.columns(2)
     with col_nav1:
         if st.button("📜 Consultar Certificados", use_container_width=True):
-            # navigate_to("ConsultaCertificados")
+            navigate_to("ConsultaCertificados")
             st.rerun()
     
     with col_nav2:
